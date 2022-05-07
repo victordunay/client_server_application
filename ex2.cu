@@ -176,7 +176,7 @@ private:
 
         for (int streamIdx = 0; streamIdx < N_STREAMS; ++streamIdx) 
         {
-            if(!u[streamIdx])
+            if(!streams_availabiluty[streamIdx])
             {
                 status = cudaStreamQuery(this->streams[streamIdx]);
                 CUDA_CHECK(status);
@@ -188,8 +188,22 @@ private:
                 }
             }
 		}
-
         return result;
+    }
+
+    /**
+     * @brief Checks for empty streams
+     * 
+     * @return int the stream id if empty. NO_EMPTY_STREAMS if there is no empty stream.
+     */
+    int findAvailableStream(void)
+    {
+        for (int streamIdx = 0; streamIdx < N_STREAMS; ++streamIdx) 
+        {
+            if(streams_availabiluty[streamIdx])
+                return streamIdx;
+        }
+        return NO_EMPTY_STREAMS;
     }
 
 
@@ -244,13 +258,12 @@ public:
     bool enqueue(int img_id, uchar *img_in, uchar *img_out) override
     {
         dim3 GRID_SIZE(N_THREADS_X, N_THREADS_Y , N_THREADS_Z);
-        int available_stream_idx = NO_EMPTY_STREAMS;
-        // TODO place memory transfers and kernel invocation in streams if possible.
-        available_stream_idx = find_available_stream();
 
-        if (NO_EMPTY_STREAMS != available_stream_idx)
+        // TODO place memory transfers and kernel invocation in streams if possible.
+        int available_stream_idx = findAvailableStream();
+
+        if (available_stream_idx != NO_EMPTY_STREAMS)
         {
-            this->stream_buffers[available_stream_idx] = allocate_stream_buffer();
             //assign image id from client
             (this->stream_buffers[available_stream_idx])->img_id = img_id;  
 
@@ -266,7 +279,6 @@ public:
             return true;
         }       
 
-        
         return false;
     }
 
