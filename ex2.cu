@@ -2,11 +2,13 @@
 #include <cuda/atomic>
 
 #define N_STREAMS (64)
+#define N_BINS (256)
 #define N_TB_SERIAL (1)
 #define N_THREADS_Y (16)
 #define N_THREADS_X (64)
 #define N_THREADS_Z (1)
 #define NO_EMPTY_STREAMS (-1)
+#define INIT_ID (-1)
 
 
 /* Task serial context struct with necessary CPU / GPU pointers to process a single image */
@@ -19,10 +21,84 @@ typedef struct
 } 
 stream_buffers_t;
 
-__device__ void prefix_sum(int arr[], int arr_size) {
-    // TODO complete according to hw1
+ /**
+  * @brief Create a histogram of the tile pixels. Assumes that the kernel runs with more than 256 threads
+  * 
+  * @param image_start The start index of the image the block processing
+  * @param t_row  The tile's row
+  * @param t_col  The tile's column
+  * @param histogram - the histogram of the tile
+  * @param image - The images array to process.
+  */
+ __device__ void create_histogram(int image_start, int t_row, int t_col ,int *histogram, uchar *image)
+ {
+    
+    int tid = threadIdx.y * blockDim.x + threadIdx.x;
+    // initialize histogram
+    if(tid < N_BINS)
+    {
+        histogram[tid] = 0;
+    }
+
+    //calculates the pixel index that assigned to the thread 
+    int row_base_offset = (t_row * TILE_WIDTH + threadIdx.y) * IMG_WIDTH ;
+    int row_interval = N_THREADS_Y * IMG_WIDTH;
+    int col_offset = t_col * TILE_WIDTH + threadIdx.x; 
+
+    uchar pixel_value = 0;
+
+    //The block has 16 rows, Therefore, it runs 4 times so every warp run on 4 different rows
+    for(int i = 0; i < TILE_WIDTH/N_THREADS_Y; i++ ) 
+    {
+        pixel_value = image[image_start + row_base_offset + (i * row_interval) + col_offset];
+        atomicAdd(&(histogram[pixel_value]), 1);
+    } 
+ }
+
+ /**
+  * @brief Calculates inclusive prefix sum of the given array. Saves the sum in the given array.
+  *      Assumes n_threads > arr_size
+  * 
+  * @param arr The given array 
+  * @param arr_size The size of the array
+  */
+__device__ void prefix_sum(int arr[], int arr_size) 
+{
+    int tid = blockDim.x * threadIdx.y + threadIdx.x;
+    int increment;
+    for (int stride = 1; stride < arr_size; stride *= 2) 
+    {
+        if (tid >= stride && tid < arr_size) 
+                increment = arr[tid - stride];
+        __syncthreads(); 
+        if (tid >= stride && tid < arr_size) 
+                arr[tid] += increment;
+        __syncthreads();
+    }
+    return;
 }
 
+/**
+ * @brief Calculates a map from the cdf and saves it in the given index in the 'maps' array.
+ * 
+ * @param map_start The start index in the 'maps' array of the current image's map
+ * @param t_row The tile's row
+ * @param t_col The tile's column
+ * @param cdf The cdf of the tile.
+ * @param maps Array of the maps of all images
+ * @return __device__ 
+ */
+__device__ void calculate_maps(int map_start, int t_row, int t_col, int *cdf, uchar *maps)
+{
+    uchar div_result = (uchar) 0;
+    int tid = blockDim.x * threadIdx.y + threadIdx.x;
+    if (tid < N_BINS)
+    {
+        div_result = (uchar)(cdf[tid] * 255.0/(TILE_WIDTH*TILE_WIDTH));
+        maps[map_start + (t_col + t_row * TILE_COUNT)*N_BINS + tid] = div_result;
+    }   
+    __syncthreads();     
+}
 /**
  * Perform interpolation on a single image
  *
@@ -34,9 +110,35 @@ __device__ void prefix_sum(int arr[], int arr_size) {
 __device__
  void interpolate_device(uchar* maps ,uchar *in_img, uchar* out_img);
 
-__device__
-void process_image(uchar *in, uchar *out, uchar* maps) {
-    // TODO complete according to hw1
+
+/**
+ * @brief process an image which assigned to the block index. It takes an image given in all_in, and return the processed image in all_out respectively.
+ * 
+ * @param in Array of input images, in global memory ([N_IMAGES][IMG_HEIGHT][IMG_WIDTH])
+ * @param all_out Array of output images, in global memory ([N_IMAGES][IMG_HEIGHT][IMG_WIDTH])
+ * @param maps 4D array ([N_IMAGES][TILES_COUNT][TILES_COUNT][256]) of    
+ *             the tiles’ maps, in global memory.
+ * @return __global__ 
+ */
+__device__ void process_image(uchar *in, uchar *out, uchar* maps) {
+
+   __shared__ int cdf[N_BINS];
+    int image_start = IMG_WIDTH * IMG_HEIGHT * blockIdx.x;
+    int map_start = TILE_COUNT * TILE_COUNT * N_BINS * blockIdx.x;
+    for(int t_row = 0; t_row< TILE_COUNT; ++t_row)
+    {
+        for(int t_col = 0; t_col< TILE_COUNT; ++t_col)
+        {
+            create_histogram(image_start,t_row, t_col, cdf, in);
+            __syncthreads();
+            prefix_sum(cdf, N_BINS);
+            calculate_maps(map_start, t_row, t_col,cdf, maps); 
+            __syncthreads();
+        }
+    }
+    interpolate_device(&maps[map_start],&in[image_start], &out[image_start]);
+    return; 
+
 }
 
 __global__
@@ -49,35 +151,48 @@ class streams_server : public image_processing_server
 private:
     // TODO define stream server context (memory buffers, streams, etc...)
 
-    stream_buffers_t * stream_buffers[N_STREAMS]
+    stream_buffers_t * stream_buffers[N_STREAMS];
 
     cudaStream_t streams[N_STREAMS];
 
-    int find_available_stream(cudaStream_t * streams)
+
+    int find_available_stream(void)
     {
         int result = NO_EMPTY_STREAMS;
 
+        cudaError_t status = cudaErrorNotReady;
+
         for (int streamIdx = 0; streamIdx < N_STREAMS; ++streamIdx) 
         {
-				if(cudaSuccess == cudaStreamQuery(streams[streamIdx]))
-                {
-                    result = streamIdx;
-                    break
-                }
+            status = cudaStreamQuery(this->streams[streamIdx]);
+
+            if(cudaSuccess == status)
+            {
+                result = streamIdx;
+                break;
+            }
 		}
 
         return result;
     }
 
+
+
+
+
+
     // Allocate GPU memory for a single input image and a single output image.
-    stream_buffers_t *allocate_stream_buffer()
+    stream_buffers_t *allocate_stream_buffer(void)
     {
-        auto context = new stream_buffers_t stream_buffer;
+        auto context = new stream_buffers_t;
 
         // allocate GPU memory for a single input image, a single output image, and maps
         CUDA_CHECK( cudaHostAlloc(&(context->image_in), IMG_WIDTH * IMG_WIDTH, 0) );
         CUDA_CHECK( cudaHostAlloc(&(context->image_out), IMG_WIDTH * IMG_WIDTH, 0) );
         CUDA_CHECK( cudaHostAlloc(&(context->maps), TILE_COUNT * TILE_COUNT * N_BINS,0) );
+
+        // initialize img_id 
+        context->img_id = INIT_ID;
 
         return context;
     }
@@ -107,31 +222,31 @@ public:
         for (int streamIdx = 0; streamIdx < N_STREAMS; ++streamIdx) 
             {
                 stream_buffer_free(stream_buffers[streamIdx]);
-                cudaStreamDestroy(streams[streamIdx]);
+                CUDA_CHECK(cudaStreamDestroy(streams[streamIdx]));
             }	
     }
 
     bool enqueue(int img_id, uchar *img_in, uchar *img_out) override
     {
         dim3 GRID_SIZE(N_THREADS_X, N_THREADS_Y , N_THREADS_Z);
-
+        int available_stream_idx = NO_EMPTY_STREAMS;
         // TODO place memory transfers and kernel invocation in streams if possible.
-        available_stream_idx = find_available_stream(&streams);
+        available_stream_idx = find_available_stream();
 
         if (NO_EMPTY_STREAMS != available_stream_idx)
         {
-            stream_buffers_t *stream_buffer[available_stream_idx] = allocate_stream_buffer();
+            this->stream_buffers[available_stream_idx] = allocate_stream_buffer();
             //assign image id from client
-            stream_buffer[available_stream_idx].img_id = img_id;  
+            (this->stream_buffers[available_stream_idx])->img_id = img_id;  
 
             //   1. copy the relevant image from images_in to the GPU memory you allocated
-            CUDA_CHECK( cudaMemcpyAsync(stream_buffer[available_stream_idx]->image_in, &img_in[image_index * IMG_WIDTH * IMG_HEIGHT], IMG_WIDTH * IMG_HEIGHT, cudaMemcpyDeviceToDevice, streams[available_stream_idx]) );
+            CUDA_CHECK( cudaMemcpyAsync((this->stream_buffers[available_stream_idx])->image_in, &img_in[img_id * IMG_WIDTH * IMG_HEIGHT], IMG_WIDTH * IMG_HEIGHT, cudaMemcpyDeviceToDevice, streams[available_stream_idx]) );
 
             //   2. invoke GPU kernel on this image
-            process_image_kernel<<<N_TB_SERIAL, GRID_SIZE, streams[available_stream_idx]>>>((stream_buffer[available_stream_idx]->image_in), (stream_buffer[available_stream_idx]->image_out), stream_buffer[available_stream_idx]->maps); 
+            process_image_kernel<<<N_TB_SERIAL, GRID_SIZE, 0, streams[available_stream_idx]>>>(((this->stream_buffers[available_stream_idx])->image_in), ((this->stream_buffers[available_stream_idx])->image_out), (this->stream_buffers[available_stream_idx])->maps); 
             
             //   3. copy output from GPU memory to relevant location in images_out_gpu_serial
-            CUDA_CHECK( cudaMemcpyAsync(&img_out[image_index * IMG_WIDTH * IMG_HEIGHT],stream_buffer[available_stream_idx]->image_out, IMG_WIDTH * IMG_HEIGHT, cudaMemcpyDeviceToDevice, streams[available_stream_idx]) );
+            CUDA_CHECK( cudaMemcpyAsync(&img_out[img_id * IMG_WIDTH * IMG_HEIGHT],(this->stream_buffers[available_stream_idx])->image_out, IMG_WIDTH * IMG_HEIGHT, cudaMemcpyDeviceToDevice, streams[available_stream_idx]) );
 
             return true;
         }       
@@ -142,26 +257,32 @@ public:
 
     bool dequeue(int *img_id) override
     {
-        return false;
+        // purpose??
+        // return false;
+
+        bool result = false;
 
         // TODO query (don't block) streams for any completed requests.
-        //for ()
-        //{
-            cudaError_t status = cudaStreamQuery(0); // TODO query diffrent stream each iteration
-            switch (status) {
-            case cudaSuccess:
-                // TODO return the img_id of the request that was completed.
-                
-                //*img_id = ...
-                return true;
-            case cudaErrorNotReady:
-                return false;
-            default:
-                CUDA_CHECK(status);
-                return false;
+        for (int streamIdx = 0; streamIdx < N_STREAMS; ++streamIdx) 
+        {
+            cudaError_t status = cudaStreamQuery(this->streams[streamIdx]); // TODO query diffrent stream each iteration
+            
+            switch (status) 
+            {
+                case cudaSuccess:
+                    // TODO return the img_id of the request that was completed.
+                    *img_id = (this->stream_buffers[streamIdx])->img_id;
+                    result = true;
+                case cudaErrorNotReady:
+                    result = false;
+                default:
+                    CUDA_CHECK(status);
+                    result = false;
             }
-        //}
+        }
+        return result;
     }
+
 };
 
 std::unique_ptr<image_processing_server> create_streams_server()
