@@ -240,13 +240,13 @@ public:
             (this->stream_buffers[available_stream_idx])->img_id = img_id;  
 
             //   1. copy the relevant image from images_in to the GPU memory you allocated
-            CUDA_CHECK( cudaMemcpyAsync((this->stream_buffers[available_stream_idx])->image_in, &img_in[img_id * IMG_WIDTH * IMG_HEIGHT], IMG_WIDTH * IMG_HEIGHT, cudaMemcpyDeviceToDevice, streams[available_stream_idx]) );
+            CUDA_CHECK( cudaMemcpyAsync((this->stream_buffers[available_stream_idx])->image_in, &img_in[img_id * IMG_WIDTH * IMG_HEIGHT], IMG_WIDTH * IMG_HEIGHT, cudaMemcpyHostToDevice, this->streams[available_stream_idx]) );
 
             //   2. invoke GPU kernel on this image
             process_image_kernel<<<N_TB_SERIAL, GRID_SIZE, 0, streams[available_stream_idx]>>>(((this->stream_buffers[available_stream_idx])->image_in), ((this->stream_buffers[available_stream_idx])->image_out), (this->stream_buffers[available_stream_idx])->maps); 
             
             //   3. copy output from GPU memory to relevant location in images_out_gpu_serial
-            CUDA_CHECK( cudaMemcpyAsync(&img_out[img_id * IMG_WIDTH * IMG_HEIGHT],(this->stream_buffers[available_stream_idx])->image_out, IMG_WIDTH * IMG_HEIGHT, cudaMemcpyDeviceToDevice, streams[available_stream_idx]) );
+            CUDA_CHECK( cudaMemcpyAsync(&img_out[img_id * IMG_WIDTH * IMG_HEIGHT],(this->stream_buffers[available_stream_idx])->image_out, IMG_WIDTH * IMG_HEIGHT, cudaMemcpyDeviceToHost, streams[available_stream_idx]) );
 
             return true;
         }       
@@ -262,26 +262,28 @@ public:
 
         bool result = false;
 
+
         // TODO query (don't block) streams for any completed requests.
-        for (int streamIdx = 0; streamIdx < N_STREAMS; ++streamIdx) 
-        {
-            cudaError_t status = cudaStreamQuery(this->streams[streamIdx]); // TODO query diffrent stream each iteration
+    //     for (int streamIdx = 0; streamIdx < N_STREAMS; ++streamIdx) 
+    //     {
+    //         cudaError_t status = cudaStreamQuery(this->streams[streamIdx]); // TODO query diffrent stream each iteration
             
-            switch (status) 
-            {
-                case cudaSuccess:
-                    // TODO return the img_id of the request that was completed.
-                    *img_id = (this->stream_buffers[streamIdx])->img_id;
-                    result = true;
-                case cudaErrorNotReady:
-                    result = false;
-                default:
-                    CUDA_CHECK(status);
-                    result = false;
-            }
-        }
-        return result;
-    }
+    //         switch (status) 
+    //         {
+    //             case cudaSuccess:
+    //                 // TODO return the img_id of the request that was completed.
+    //                 *img_id = (this->stream_buffers[streamIdx])->img_id;
+    //                 result = true;
+    //             case cudaErrorNotReady:
+    //                 result = false;
+    //             default:
+    //                 CUDA_CHECK(status);
+    //                 result = false;
+    //         }
+    //     }
+         return result;
+     }
+
 
 };
 
