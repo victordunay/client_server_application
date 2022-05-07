@@ -126,8 +126,8 @@ __device__
  *             the tiles’ maps, in global memory.
  * @return __global__ 
  */
-__device__ void process_image(uchar *in, uchar *out, uchar* maps) {
-
+__device__ void process_image(uchar *in, uchar *out, uchar* maps) 
+{
    __shared__ int cdf[N_BINS];
     int image_start = IMG_WIDTH * IMG_HEIGHT * blockIdx.x;
     int map_start = TILE_COUNT * TILE_COUNT * N_BINS * blockIdx.x;
@@ -149,7 +149,7 @@ __device__ void process_image(uchar *in, uchar *out, uchar* maps) {
 
 
 /*********************************************************************************************************/
-/*                                         server class                                                  */
+/*                                      streams_server class                                             */
 /*********************************************************************************************************/
 __global__
 void process_image_kernel(uchar *in, uchar *out, uchar* maps){
@@ -162,7 +162,7 @@ private:
     // TODO define stream server context (memory buffers, streams, etc...)
     stream_buffers_t * stream_buffers[N_STREAMS];
     cudaStream_t streams[N_STREAMS];
-    bool streams_availabiluty[N_STREAMS];
+    bool streams_availability[N_STREAMS];
 
     /**
      * @brief Checks if any of the working streams has finished. If there is, it change to a free stream and its img_id returned
@@ -176,13 +176,13 @@ private:
 
         for (int streamIdx = 0; streamIdx < N_STREAMS; ++streamIdx) 
         {
-            if(!streams_availabiluty[streamIdx])
+            if(!streams_availability[streamIdx])
             {
                 status = cudaStreamQuery(this->streams[streamIdx]);
                 CUDA_CHECK(status);
                 if(cudaSuccess == status)
                 {
-                    streams_availabilty[streamIdx] = true;
+                    streams_availability[streamIdx] = true;
                     result = streamIdx;
                     break;
                 }
@@ -200,7 +200,7 @@ private:
     {
         for (int streamIdx = 0; streamIdx < N_STREAMS; ++streamIdx) 
         {
-            if(streams_availabiluty[streamIdx])
+            if(streams_availability[streamIdx])
                 return streamIdx;
         }
         return NO_EMPTY_STREAMS;
@@ -239,7 +239,7 @@ public:
     { 
 		for (int streamIdx = 0; streamIdx < N_STREAMS; ++streamIdx) 
         {
-			CUDA_CHECK(cudaStreamCreate(&streams[streamIdx])();
+			CUDA_CHECK(cudaStreamCreate(&streams[streamIdx]));
             stream_buffers[streamIdx] = allocate_stream_buffer();
             streams_availability[streamIdx] = true;
 		}	      
@@ -248,10 +248,10 @@ public:
     ~streams_server() override
     {
         for (int streamIdx = 0; streamIdx < N_STREAMS; ++streamIdx) 
-            {
-                stream_buffer_free(stream_buffers[streamIdx]);
-                CUDA_CHECK(cudaStreamDestroy(streams[streamIdx]));
-            }	
+        {
+            stream_buffer_free(stream_buffers[streamIdx]);
+            CUDA_CHECK(cudaStreamDestroy(streams[streamIdx]));
+        }	
     }
 
 
@@ -266,16 +266,14 @@ public:
         {
             //assign image id from client
             (this->stream_buffers[available_stream_idx])->img_id = img_id;  
-
+            printf("the last print works\n");
             //   1. copy the relevant image from images_in to the GPU memory you allocated
             CUDA_CHECK( cudaMemcpyAsync((this->stream_buffers[available_stream_idx])->image_in, &img_in[img_id * IMG_WIDTH * IMG_HEIGHT], IMG_WIDTH * IMG_HEIGHT, cudaMemcpyHostToDevice, this->streams[available_stream_idx]) );
-
+            printf("the last print doesnt work\n");
             //   2. invoke GPU kernel on this image
             process_image_kernel<<<N_TB_SERIAL, GRID_SIZE, 0, streams[available_stream_idx]>>>(((this->stream_buffers[available_stream_idx])->image_in), ((this->stream_buffers[available_stream_idx])->image_out), (this->stream_buffers[available_stream_idx])->maps); 
-            
             //   3. copy output from GPU memory to relevant location in images_out_gpu_serial
             CUDA_CHECK( cudaMemcpyAsync(&img_out[img_id * IMG_WIDTH * IMG_HEIGHT],(this->stream_buffers[available_stream_idx])->image_out, IMG_WIDTH * IMG_HEIGHT, cudaMemcpyDeviceToHost, streams[available_stream_idx]) );
-
             return true;
         }       
 
@@ -284,42 +282,16 @@ public:
 
     bool dequeue(int *img_id) override
     {
-        // purpose??
-        // return false;
-
-        // TODO query (don't block) streams for any completed requests.
-
-        //checks if there there is a stream that finished and return its img_id
         int id = checkFinishedStreams();
         if(id == NO_EMPTY_STREAMS)
-            result = false;
+            return false;
         *img_id = id;
-        return true;
-
-        /*
-        for (int streamIdx = 0; streamIdx < N_STREAMS; ++streamIdx) 
-        {
-            cudaError_t status = cudaStreamQuery(this->streams[streamIdx]); // TODO query diffrent stream each iteration
-            
-            switch (status) 
-            {
-                case cudaSuccess:
-                    // TODO return the img_id of the request that was completed.
-                    *img_id = (this->stream_buffers[streamIdx])->img_id;
-                    return true;
-                case cudaErrorNotReady:
-                    continue;
-                default:
-                    CUDA_CHECK(status);
-                    result = false;
-            }
-        }
-        return false;
-        */
+        return true;   
     }
-
-
 };
+
+
+
 
 std::unique_ptr<image_processing_server> create_streams_server()
 {
@@ -333,6 +305,7 @@ std::unique_ptr<image_processing_server> create_streams_server()
 
 class queue_server : public image_processing_server
 {
+
 private:
     // TODO define queue server context (memory buffers, etc...)
 public:
@@ -368,3 +341,4 @@ std::unique_ptr<image_processing_server> create_queues_server(int threads)
 {
     return std::make_unique<queue_server>(threads);
 }
+
