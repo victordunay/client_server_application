@@ -163,8 +163,11 @@ int main(int argc, char **argv) {
         while (next_img_id < N_IMAGES || num_dequeued < N_IMAGES) {
             int dequeued_img_id;
             if (server->dequeue(&dequeued_img_id)) {
+                
                 ++num_dequeued;
+
                 req_t_end[dequeued_img_id] = get_time_msec();
+
             }
             /* If we are done with enqueuing, just loop until all are dequeued */
             if (next_img_id == N_IMAGES)
