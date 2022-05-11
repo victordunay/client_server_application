@@ -143,6 +143,8 @@ __device__ void process_image(uchar *in, uchar *out, uchar* maps)
         }
     }
     interpolate_device(&maps[map_start],&in[image_start], &out[image_start]);
+    //unsigned int ns = 70000000;
+    //__nanosleep(ns);
     return; 
 
 }
@@ -178,7 +180,6 @@ private:
 
         for (int streamIdx = 0; streamIdx < N_STREAMS; ++streamIdx) 
         {
-
             if(!streams_availability[streamIdx])
             {
                 status = cudaStreamQuery(this->streams[streamIdx]);
@@ -201,7 +202,7 @@ private:
      */
     int findAvailableStream(void)
     {
-        for (int streamIdx = 0; streamIdx < N_STREAMS; ++streamIdx) 
+        for (int streamIdx = 0; streamIdx < N_STREAMS ; ++streamIdx) 
         {
             if(streams_availability[streamIdx])
                 return streamIdx;
@@ -216,7 +217,7 @@ private:
         auto context = new stream_buffers_t;
 
         // allocate GPU memory for a single input image, a single output image, and maps
-        CUDA_CHECK( cudaHostAlloc(&(context->image_in), IMG_WIDTH * IMG_WIDTH, 0) );
+        CUDA_CHECK( cudaHostAlloc(&(context->image_in), IMG_WIDTH * IMG_WIDTH, 0) ); 
         CUDA_CHECK( cudaHostAlloc(&(context->image_out), IMG_WIDTH * IMG_WIDTH, 0) );
         CUDA_CHECK( cudaHostAlloc(&(context->maps), TILE_COUNT * TILE_COUNT * N_BINS,0) );
 
@@ -242,7 +243,7 @@ public:
     { 
 		for (int streamIdx = 0; streamIdx < N_STREAMS; ++streamIdx) 
         {
-			CUDA_CHECK(cudaStreamCreate(&streams[streamIdx]));
+			CUDA_CHECK(cudaStreamCreateWithFlags(&streams[streamIdx],cudaStreamNonBlocking));
             stream_buffers[streamIdx] = allocate_stream_buffer();
             streams_availability[streamIdx] = true;
 		}
@@ -268,18 +269,19 @@ public:
         if (available_stream_idx != NO_EMPTY_STREAMS)
         {
             //assign image id from client
-            this->stream_buffers[available_stream_idx]->img_id = img_id;
-            this->streams_availability[available_stream_idx] = false;
+            //printf("stream idx:%d",available_stream_idx);
+            stream_buffers[available_stream_idx]->img_id = img_id;
+            streams_availability[available_stream_idx] = false;
+
             //   1. copy the relevant image from images_in to the GPU memory you allocated
-            CUDA_CHECK( cudaMemcpyAsync(this->stream_buffers[available_stream_idx]->image_in, img_in, IMG_WIDTH * IMG_HEIGHT, cudaMemcpyHostToDevice, this->streams[available_stream_idx]) );
+            CUDA_CHECK( cudaMemcpyAsync(stream_buffers[available_stream_idx]->image_in, img_in, IMG_WIDTH * IMG_HEIGHT, cudaMemcpyHostToDevice, streams[available_stream_idx]) );
+
             //   2. invoke GPU kernel on this image
-            process_image_kernel<<<N_TB_SERIAL, GRID_SIZE, 0, streams[available_stream_idx]>>>(this->stream_buffers[available_stream_idx]->image_in, this->stream_buffers[available_stream_idx]->image_out, this->stream_buffers[available_stream_idx]->maps); 
+            process_image_kernel<<<N_TB_SERIAL, GRID_SIZE, 0, streams[available_stream_idx]>>>(stream_buffers[available_stream_idx]->image_in, stream_buffers[available_stream_idx]->image_out, stream_buffers[available_stream_idx]->maps); 
 
             //   3. copy output from GPU memory to relevant location in images_out_gpu_serial
-            CUDA_CHECK( cudaMemcpyAsync(img_out, this->stream_buffers[available_stream_idx]->image_out, IMG_WIDTH * IMG_HEIGHT, cudaMemcpyDeviceToHost, this->streams[available_stream_idx]) );
+            CUDA_CHECK( cudaMemcpyAsync(img_out, stream_buffers[available_stream_idx]->image_out, IMG_WIDTH * IMG_HEIGHT, cudaMemcpyDeviceToHost, streams[available_stream_idx]) );
 
-            
-            
             
             return true;
         }       
@@ -297,6 +299,7 @@ public:
 
         // get the img_id of the finished job 
         *img_id = this->stream_buffers[finished_stream_idx]->img_id;
+        //printf(" img_id:%d\n",*img_id);
         return true;   
     }
 };
@@ -306,7 +309,10 @@ public:
 
 std::unique_ptr<image_processing_server> create_streams_server()
 {
-    return std::make_unique<streams_server>();
+    std::unique_ptr<image_processing_server> serv = std::make_unique<streams_server>();
+    int a;
+    serv->dequeue(&a);
+    return serv;
 }
 
 // TODO implement a lock

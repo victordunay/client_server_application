@@ -1,4 +1,4 @@
-DEBUG=1
+DEBUG=0
 
 ifneq ($(DEBUG), 0)
 CFLAGS=-O0 -g -G -Xcompiler -rdynamic -lineinfo
