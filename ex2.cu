@@ -378,13 +378,18 @@ public:
         int num_of_slots =(int) (pow(2,ceil(log2(16*threadblocks))));
         printf("%d number of slots:%d",threadblocks,num_of_slots);
 
-        
+
         
     }
 
     ~queue_server() override
     {
         // TODO free resources allocated in constructor
+        
+        //set a flag in the global memory to true and wait until the kernel stops. or send img_id -1 to stop it
+
+        //wait until the kernel stops
+        CUDA_CHECK(cudaDeviceSynchronize());
     }
 
     bool enqueue(int img_id, uchar *img_in, uchar *img_out) override
