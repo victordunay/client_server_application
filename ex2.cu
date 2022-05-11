@@ -344,12 +344,13 @@ public:
     uchar *data;
     atomic_lock_t _lock;
 
-    __device__ void lock(atomic_lock_t * _lock) 
+    __device__  __host__ void lock(atomic_lock_t * _lock) 
     {
-        while (_lock->exchange(1, cuda::memory_order_acq_rel));
+        while (_lock->exchange(1, cuda::cuda::memory_order_relaxed));
+        cuda::atomic_thread_fence(cuda::memory_order_acquire, cuda::thread_scope_device);
     }
 
-    __device__ void unlock(atomic_lock_t * _lock) 
+    __device__ __host__ void unlock(atomic_lock_t * _lock) 
     {
         _lock->store(0, cuda::memory_order_release);
     }
@@ -370,6 +371,19 @@ public:
         cudaFreeHost(data);
     }
 };
+
+
+__global__
+void consumer_proccessor(shared_queue *gpu_to_cpu_q,shared_queue *cpu_to_gpu_q,uchar *in, uchar *out, uchar* maps){
+    int img_id = cpu_to_gpu_q.dequeue_request(in);
+    while(img_id)
+    {
+        process_image(in, out, maps);
+        gpu_to_cpu_q.enqueue_response(out);
+        img_index = cpu_to_gpu_q.dequeue_request(in);
+    }
+}
+
 
 class queue_server : public image_processing_server
 {
@@ -420,6 +434,10 @@ public:
         
         gpu_to_cpu_q = new shared_queue (num_of_slots);
         cpu_to_gpu_q = new shared_queue (num_of_slots);
+        for(int i = 0; i < threadblocks;i++)
+        {
+            process_image_kernel<<<N_TB_SERIAL, GRID_SIZE, 0, streams[available_stream_idx]>>>(stream_buffers[available_stream_idx]->image_in, stream_buffers[available_stream_idx]->image_out, stream_buffers[available_stream_idx]->maps); 
+        }
    
     }
 
