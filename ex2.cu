@@ -48,13 +48,13 @@ stream_buffers_t;
 
     //calculates the pixel index that assigned to the thread 
     int row_base_offset = (t_row * TILE_WIDTH + threadIdx.y) * IMG_WIDTH ;
-    int row_interval = N_THREADS_Y * IMG_WIDTH;
+    int row_interval = blockDim.y * IMG_WIDTH;
     int col_offset = t_col * TILE_WIDTH + threadIdx.x; 
 
     uchar pixel_value = 0;
 
     //The block has 16 rows, Therefore, it runs 4 times so every warp run on 4 different rows
-    for(int i = 0; i < TILE_WIDTH/N_THREADS_Y; i++ ) 
+    for(int i = 0; i < TILE_WIDTH/blockDim.y; i++ ) 
     {
         pixel_value = image[image_start + row_base_offset + (i * row_interval) + col_offset];
         atomicAdd(&(histogram[pixel_value]), 1);
