@@ -9,6 +9,9 @@
 #define N_THREADS_Z (1)
 #define NO_EMPTY_STREAMS (-1)
 #define INIT_ID (-1)
+#define SHARED_MEM_PER_BLOCK (2048)
+#define REGISTERS_PER_THREAD (32)
+#define DEVICE (1)
 
 
 /* Task serial context struct with necessary CPU / GPU pointers to process a single image */
@@ -304,32 +307,64 @@ public:
     }
 };
 
-
-
-
 std::unique_ptr<image_processing_server> create_streams_server()
 {
     std::unique_ptr<image_processing_server> serv = std::make_unique<streams_server>();
-    int a;
-    serv->dequeue(&a);
     return serv;
 }
+
+/*********************************************************************************************************/
+/*                                      queue_server class                                             */
+/*********************************************************************************************************/
 
 // TODO implement a lock
 // TODO implement a MPMC queue
 // TODO implement the persistent kernel
 // TODO implement a function for calculating the threadblocks count
 
+typedef struct 
+{
+    uchar *image_in;
+    uchar *image_out;
+    uchar *maps;
+    int img_id;
+} 
+stream_buffers_t;
+
+
+
 class queue_server : public image_processing_server
 {
 
 private:
     // TODO define queue server context (memory buffers, etc...)
+    stream_buffers_t * queue_in;
+    stream_buffers_t * queue_out;
+
+    int calcNumOfTB(int threads)
+    {
+        cudaDeviceProp prop;
+        CUDA_CHECK(cudaGetDeviceProperties(&prop, DEVICE));
+        printf("overlaping - %d",prop.deviceOverlap);
+        int shared_per_multi = prop.sharedMemPerMultiprocessor;
+        int threads_per_multi = prop.maxThreadsPerMultiProcessor ;
+        int regs_per_multi = prop.regsPerMultiprocessor;
+        int num_of_multi = prop.cudaDevAttrMultiProcessorCount;
+        
+        int threads_bound =  (threads_per_multi/threads)*num_of_multi;
+        int shared_mem_bound =  (shared_per_multi/SHARED_MEM_PER_BLOCK)*num_of_multi;
+        int regs_bound =  (regs_per_multi/(REGISTERS_PER_THREAD*threads))*num_of_multi;
+
+        return min(min(threads_bound,shared_mem_bound),regs_bound);
+    }
 public:
     queue_server(int threads)
     {
         // TODO initialize host state
         // TODO launch GPU persistent kernel with given number of threads, and calculated number of threadblocks
+        int threadblocks = calcNumOfTB(int threads);
+        int num_of_slots = pow(2,ceil(log2(16*threadblocks)));
+        
     }
 
     ~queue_server() override
