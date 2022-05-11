@@ -11,7 +11,7 @@
 #define INIT_ID (-1)
 #define SHARED_MEM_PER_BLOCK (2048)
 #define REGISTERS_PER_THREAD (32)
-#define DEVICE (1)
+#define DEVICE (0)
 
 
 /* Task serial context struct with necessary CPU / GPU pointers to process a single image */
@@ -329,7 +329,7 @@ typedef struct
     uchar *maps;
     int img_id;
 } 
-stream_buffers_t;
+queue_buffers_t;
 
 
 
@@ -345,25 +345,40 @@ private:
     {
         cudaDeviceProp prop;
         CUDA_CHECK(cudaGetDeviceProperties(&prop, DEVICE));
-        printf("overlaping - %d",prop.deviceOverlap);
-        int shared_per_multi = prop.sharedMemPerMultiprocessor;
+
+        int num_of_multi = prop.multiProcessorCount;
         int threads_per_multi = prop.maxThreadsPerMultiProcessor ;
         int regs_per_multi = prop.regsPerMultiprocessor;
-        int num_of_multi = prop.cudaDevAttrMultiProcessorCount;
+        int shared_per_multi = prop.sharedMemPerMultiprocessor;
         
-        int threads_bound =  (threads_per_multi/threads)*num_of_multi;
-        int shared_mem_bound =  (shared_per_multi/SHARED_MEM_PER_BLOCK)*num_of_multi;
-        int regs_bound =  (regs_per_multi/(REGISTERS_PER_THREAD*threads))*num_of_multi;
+        int threads_bound = (int) (floor(threads_per_multi/threads)*num_of_multi);
+        int regs_bound = (int) (floor(regs_per_multi/(REGISTERS_PER_THREAD*threads))*num_of_multi);
+        int shared_mem_bound = (int) (floor(shared_per_multi/SHARED_MEM_PER_BLOCK)*num_of_multi);
 
-        return min(min(threads_bound,shared_mem_bound),regs_bound);
+        //printf("number of SMs : %d\n\n every SM supports %d threads, %d registers and %d shared memory\n",num_of_multi,threads_per_multi,regs_per_multi,shared_per_multi);
+        //printf("thus the bounds are:\n %d for threads\n %d for registers\n %d for shared memory\n",threads_bound,regs_bound,shared_mem_bound);
+        //int lesser = threads_bound - regs_bound;
+        if(threads_bound > shared_mem_bound)
+        {
+            return (shared_mem_bound>regs_bound) ? regs_bound : shared_mem_bound;
+        }
+        else
+        {
+            return (threads_bound>regs_bound) ? regs_bound : threads_bound;
+        }
+        return -1;
     }
+
 public:
     queue_server(int threads)
     {
         // TODO initialize host state
         // TODO launch GPU persistent kernel with given number of threads, and calculated number of threadblocks
-        int threadblocks = calcNumOfTB(int threads);
-        int num_of_slots = pow(2,ceil(log2(16*threadblocks)));
+        int threadblocks = calcNumOfTB(threads);
+        int num_of_slots =(int) (pow(2,ceil(log2(16*threadblocks))));
+        printf("%d number of slots:%d",threadblocks,num_of_slots);
+
+        
         
     }
 
