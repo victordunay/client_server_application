@@ -14,6 +14,8 @@
 #define DEVICE (0)
 
 
+typedef cuda::atomic<bool> atomic_lock_t;
+
 /* Task serial context struct with necessary CPU / GPU pointers to process a single image */
 typedef struct 
 {
@@ -333,6 +335,42 @@ queue_buffers_t;
 
 
 
+class shared_queue 
+{
+private:
+      
+public:
+
+    uchar *data;
+    atomic_lock_t _lock;
+
+    __device__ void lock(atomic_lock_t * _lock) 
+    {
+        while (_lock->exchange(1, cuda::memory_order_acq_rel));
+    }
+
+    __device__ void unlock(atomic_lock_t * _lock) 
+    {
+        _lock->store(0, cuda::memory_order_release);
+    }
+
+    shared_queue(int size_in_bytes)
+    {   
+        // Allocate shared_memory
+        cudaMallocHost(&data, size_in_bytes);
+
+        // initialize shared memory
+        cudaMemset(data, 0, size_in_bytes);
+        _lock = false;
+    }
+
+    ~shared_queue() 
+    {
+        _lock.~atomic<bool>();
+        cudaFreeHost(data);
+    }
+};
+
 class queue_server : public image_processing_server
 {
 
@@ -340,6 +378,8 @@ private:
     // TODO define queue server context (memory buffers, etc...)
     stream_buffers_t * queue_in;
     stream_buffers_t * queue_out;
+    shared_queue *gpu_to_cpu_q;
+    shared_queue *cpu_to_gpu_q;
 
     int calcNumOfTB(int threads)
     {
@@ -377,24 +417,23 @@ public:
         int threadblocks = calcNumOfTB(threads);
         int num_of_slots =(int) (pow(2,ceil(log2(16*threadblocks))));
         printf("%d number of slots:%d",threadblocks,num_of_slots);
-
-
         
+        gpu_to_cpu_q = new shared_queue (num_of_slots);
+        cpu_to_gpu_q = new shared_queue (num_of_slots);
+   
     }
 
     ~queue_server() override
     {
         // TODO free resources allocated in constructor
-        
-        //set a flag in the global memory to true and wait until the kernel stops. or send img_id -1 to stop it
-
-        //wait until the kernel stops
-        CUDA_CHECK(cudaDeviceSynchronize());
+        gpu_to_cpu_q->~shared_queue();
+        cpu_to_gpu_q->~shared_queue();
     }
 
     bool enqueue(int img_id, uchar *img_in, uchar *img_out) override
     {
         // TODO push new task into queue if possible
+         
         return false;
     }
 
@@ -413,4 +452,3 @@ std::unique_ptr<image_processing_server> create_queues_server(int threads)
 {
     return std::make_unique<queue_server>(threads);
 }
-
