@@ -16,7 +16,7 @@
 
 typedef cuda::atomic<bool> atomic_lock_t;
 
-using namespace cuda;
+//using namespace cuda;
 
 /* Task serial context struct with necessary CPU / GPU pointers to process a single image */
 typedef struct 
