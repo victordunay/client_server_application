@@ -16,6 +16,8 @@
 
 typedef cuda::atomic<bool> atomic_lock_t;
 
+using namespace cuda;
+
 /* Task serial context struct with necessary CPU / GPU pointers to process a single image */
 typedef struct 
 {
@@ -334,7 +336,7 @@ queue_buffers_t;
 
 typedef struct 
 {
-    uchar *image;
+    uchar image[IMG_WIDTH * IMG_WIDTH];
     int img_id;
 } 
 queue_item_t;
@@ -346,53 +348,61 @@ class shared_queue
 private:
 
     //queue data
-    queue_item_t *data;
     size_t queue_size;
     bool cpu_side;
+    queue_item_t *data;
 
     //queue sync variables
-    cuda::atomic<size_t> _head;
-    cuda::atomic<size_t> _tail;
-    atomic_lock_t _lock;
+    atomic<size_t> _head;
+    atomic<size_t> _tail;
+    atomic_lock_t _readerlock;
+    atomic_lock_t _writerlock;
       
 
     //locks functions
 
-    __device__  __host__ void readerLock(atomic_lock_t * _lock) 
+    __device__  __host__ void Lock(atomic_lock_t * _lock) 
     {
-        while(_lock->load(cuda::memory_order_acquire) == true);
-        while(_lock->exchange(1, cuda::memory_order_relaxed));
-        cuda::atomic_thread_fence(cuda::memory_order_acquire, cuda::thread_scope_device);
+        while(_lock->load(memory_order_acquire) == true);
+        while(_lock->exchange(1, memory_order_relaxed));
+        atomic_thread_fence(memory_order_acquire, thread_scope_device);
     }
 
-    __device__ __host__ void readerUnlock(atomic_lock_t * _lock) 
+    __device__ __host__ void Unlock(atomic_lock_t * _lock) 
     {
-        _lock->store(0, cuda::memory_order_release);
+        _lock->store(0, memory_order_release);
     }
+
 
 public:
 
-    __device__  __host__ void push(int img_id, uchar *img)
+    __device__  __host__ void enqueue_response(int img_id, uchar *img)
     {
-        int tail =  _tail.load(cuda::memory_order_relaxed);
-        while (tail - _head.load(cuda::memory_order_acquire) == queue_size);
-        
-        
+
+        Lock(_writerlock);
+        int tail =  _tail.load(memory_order_relaxed);
+        while (tail - _head.load(memory_order_acquire) == queue_size);
+            Unlock(_writerlock);
+            Lock(_writerlock);
+            tail =  _tail.load(memory_order_relaxed);
+        }
+
         //cpu copy from cpu memory to gpu memory. gpu copy from gpu memory to another gpu memory
         cudaMemcpyKind kind = (cpu_side) ? cudaMemcpyHostToDevice : cudaMemcpyDeviceToDevice ;
         CUDA_CHECK(cudaMemcpy(data[tail % queue_size]->image,img,IMG_WIDTH * IMG_HEIGHT, kind));
         data[tail % queue_size]->img_id = img_id;
-        _tail.store(tail + 1, cuda::memory_order_release);
+        _tail.store(tail + 1, memory_order_release);
+        Unlock(_writerlock);
     }
 
-    __device__  __host__ int pop(uchar *img)
+    __device__  __host__ int dequeue_request(uchar *img)
     {
-        readerLock(_lock);
+        Lock(_readerlock);
         int head = _head.load(memory_order_relaxed);
         while (_tail.load(memory_order_acquire) == _head)
         {
-            readerUnlock(_lock);
-            readerLock(_lock);
+            Unlock(_readerlock);
+            Lock(_readerlock);
             head = _head.load(memory_order_relaxed);
         }
 
@@ -402,31 +412,39 @@ public:
         int img_id = data[head % queue_size]->img_id;
 
         _head.store(head + 1, memory_order_release);
-        readerUnlock(_lock);
+        Unlock(_readerlock);
         return img_id;
     }
 
 
 
-
-
-
-    shared_queue(int size_in_bytes)
+    shared_queue(int queue_size,bool cpu_side):queue_size(queue_size),cpu_side(cpu_side),data(nullptr),_head(0),_tail(0),_readerlock(false),_writerlock(false)
     {   
-        // Allocate shared_memory
-        cudaMallocHost(&data, size_in_bytes);
+        // Allocate queue memory
+        size_t size_in_bytes = queue_size * sizeof(queue_item_t);
+        CUDA_CHECK(cudaMallocHost(&((void*)data), size_in_bytes));
+        CUDA_CHECK(cudaMemset(((void*)data), 0, size_in_bytes));
 
-        // initialize shared memory
-        cudaMemset(data, 0, size_in_bytes);
-        _lock = false;
+        for(int i = 0; i< queue_size; ++i)
+        {
+            new (data[i]) queue_item_t();
+        }
+    
     }
 
     ~shared_queue() 
     {
-        _lock.~atomic<bool>();
-        cudaFreeHost(data);
+        queue_item_t *temp = data;
+        for(int i = 0; i< queue_size; ++i)
+        {
+            data[i]->~queue_item_t();
+        }
+
+        cudaFreeHost(((void*)data));
     }
 };
+
+
 
 
 __global__
@@ -450,6 +468,7 @@ private:
     stream_buffers_t * queue_out;
     shared_queue *gpu_to_cpu_q;
     shared_queue *cpu_to_gpu_q;
+    char* pinned_host_buffer;
 
     int calcNumOfTB(int threads)
     {
@@ -483,18 +502,30 @@ public:
     queue_server(int threads)
     {
         // TODO initialize host state
-        // TODO launch GPU persistent kernel with given number of threads, and calculated number of threadblocks
         int threadblocks = calcNumOfTB(threads);
         int num_of_slots =(int) (pow(2,ceil(log2(16*threadblocks))));
         printf("%d number of slots:%d",threadblocks,num_of_slots);
         
-        gpu_to_cpu_q = new shared_queue (num_of_slots);
-        cpu_to_gpu_q = new shared_queue (num_of_slots);
-        for(int i = 0; i < threadblocks;i++)
-        {
-            process_image_kernel<<<N_TB_SERIAL, GRID_SIZE, 0, streams[available_stream_idx]>>>(stream_buffers[available_stream_idx]->image_in, stream_buffers[available_stream_idx]->image_out, stream_buffers[available_stream_idx]->maps); 
-        }
-   
+        cudaMallocHost(&pinned_host_buffer, 2 * sizeof(shared_queue));
+        // Use placement new operator to construct our class on the pinned buffer
+        shared_queue *cpu_to_gpu_q = new (pinned_host_buffer) shared_queue(num_of_slots);
+        shared_queue *gpu_to_cpu_q = new (pinned_host_buffer + sizeof(shared_queue)) shared_queue(num_of_slots);
+
+        
+        // TODO launch GPU persistent kernel with given number of threads, and calculated number of threadblocks
+
+         //initiate data for proccessing - allocating arrays of data like in bulk for temp use.
+         uchar* image_in;
+         uchar* image_out;
+         uchar* maps;
+         CUDA_CHECK( cudaHostAlloc(&image_in,N_IMAGES * IMG_WIDTH * IMG_WIDTH ,0) );
+         CUDA_CHECK( cudaHostAlloc(&image_out,N_IMAGES * IMG_WIDTH * IMG_WIDTH,0) );
+         CUDA_CHECK( cudaHostAlloc(&maps,N_IMAGES * TILE_COUNT * TILE_COUNT * N_BINS,0) );
+ 
+         //kernel invocing
+         dim3 GRID_SIZE(N_THREADS_X, threads/N_THREADS_X , N_THREADS_Z);
+         consumer_proccessor<<<threadblocks, GRID_SIZE>>>(gpu_to_cpu_q,cpu_to_gpu_q,image_in, image_out, maps); 
+
     }
 
     ~queue_server() override
