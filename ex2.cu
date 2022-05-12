@@ -16,6 +16,7 @@
 
 typedef cuda::atomic<bool> atomic_lock_t;
 
+
 //using namespace cuda;
 
 /* Task serial context struct with necessary CPU / GPU pointers to process a single image */
@@ -342,8 +343,8 @@ private:
     int *data;
 
     //queue sync variables
-    atomic<size_t> _head;
-    atomic<size_t> _tail;
+    cuda::atomic<size_t> _head;
+    cuda::atomic<size_t> _tail;
     atomic_lock_t _readerlock;
     atomic_lock_t _writerlock;
       
@@ -352,14 +353,14 @@ private:
 
     __device__  __host__ void Lock(atomic_lock_t * _lock) 
     {
-        while(_lock->load(memory_order_acquire) == true);
-        while(_lock->exchange(1, memory_order_relaxed));
-        atomic_thread_fence(memory_order_acquire, thread_scope_device);
+        while(_lock->load(cuda::memory_order_acquire) == true);
+        while(_lock->exchange(1, cuda::memory_order_relaxed));
+        atomic_thread_fence(cuda::memory_order_acquire, cuda::thread_scope_device);
     }
 
     __device__ __host__ void Unlock(atomic_lock_t * _lock) 
     {
-        _lock->store(0, memory_order_release);
+        _lock->store(0, cuda::memory_order_release);
     }
 
 
@@ -368,36 +369,36 @@ public:
     __device__  __host__ void enqueue_response(int img_id, uchar *img)
     {
         Lock(_writerlock);
-        int tail =  _tail.load(memory_order_relaxed);
-        while (tail - _head.load(memory_order_acquire) == queue_size);
+        int tail =  _tail.load(cuda::memory_order_relaxed);
+        while (tail - _head.load(cuda::memory_order_acquire) == queue_size);
             Unlock(_writerlock);
             Lock(_writerlock);
-            tail =  _tail.load(memory_order_relaxed);
+            tail =  _tail.load(cuda::memory_order_relaxed);
         }
 
         //cpu copy from cpu memory to gpu memory. gpu copy from gpu memory to another gpu memory
         //cudaMemcpyKind kind = (cpu_side) ? cudaMemcpyHostToDevice : cudaMemcpyDeviceToDevice ;
         
         data[tail % queue_size] = img_id;
-        _tail.store(tail + 1, memory_order_release);
+        _tail.store(tail + 1, cuda::memory_order_release);
         Unlock(_writerlock);
     }
 
     __device__  __host__ int dequeue_request(uchar *img)
     {
         Lock(_readerlock);
-        int head = _head.load(memory_order_relaxed);
-        while (_tail.load(memory_order_acquire) == _head)
+        int head = _head.load(cuda::memory_order_relaxed);
+        while (_tail.load(cuda::memory_order_acquire) == _head)
         {
             Unlock(_readerlock);
             Lock(_readerlock);
-            head = _head.load(memory_order_relaxed);
+            head = _head.load(cuda::memory_order_relaxed);
         }
 
         //cpu copy from gpu memory to cpu memory. gpu copy from gpu memory to another gpu memory
         int img_id = data[head % queue_size];
 
-        _head.store(head + 1, memory_order_release);
+        _head.store(head + 1, cuda::memory_order_release);
         Unlock(_readerlock);
         return img_id;
     }
@@ -429,10 +430,15 @@ void consumer_proccessor(shared_queue *gpu_to_cpu_q,shared_queue *cpu_to_gpu_q,u
     __syncthreads();
     while(img_id)
     {
+        //did not finish this
         CUDA_CHECK( cudaMemcpy(stream_buffers[available_stream_idx]->image_in, img_in, IMG_WIDTH * IMG_HEIGHT, cudaMemcpyHostToDevice, streams[available_stream_idx]) );
         process_image(in, out, maps);
-        gpu_to_cpu_q.enqueue_response(out);
-        img_index = cpu_to_gpu_q.dequeue_request(in);
+        if(threadIdx.y + threadIdx.x == 0 )
+            gpu_to_cpu_q.enqueue_response(out);
+        __syncthreads();
+        if(threadIdx.y + threadIdx.x == 0 )
+            img_index = cpu_to_gpu_q.dequeue_request(in);
+        __syncthreads();
     }
 }
 
