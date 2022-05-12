@@ -45,7 +45,7 @@ stream_buffers_t;
     {
         histogram[tid] = 0;
     }
-
+    __syncthreads();
     //calculates the pixel index that assigned to the thread 
     int row_base_offset = (t_row * TILE_WIDTH + threadIdx.y) * IMG_WIDTH ;
     int row_interval = N_THREADS_Y * IMG_WIDTH;
@@ -215,9 +215,9 @@ private:
         auto context = new stream_buffers_t;
 
         // allocate GPU memory for a single input image, a single output image, and maps
-        CUDA_CHECK( cudaHostAlloc(&(context->image_in), IMG_WIDTH * IMG_WIDTH, 0) );
-        CUDA_CHECK( cudaHostAlloc(&(context->image_out), IMG_WIDTH * IMG_WIDTH, 0) );
-        CUDA_CHECK( cudaHostAlloc(&(context->maps), TILE_COUNT * TILE_COUNT * N_BINS,0) );
+        CUDA_CHECK( cudaMalloc(&(context->image_in), IMG_WIDTH * IMG_WIDTH) );
+        CUDA_CHECK( cudaMalloc(&(context->image_out), IMG_WIDTH * IMG_WIDTH) );
+        CUDA_CHECK( cudaMalloc(&(context->maps), TILE_COUNT * TILE_COUNT * N_BINS) );
 
         // initialize img_id 
         context->img_id = INIT_ID;
@@ -229,9 +229,9 @@ private:
     void stream_buffer_free(stream_buffers_t *stream_buffer)
     {
         //TODO: free resources allocated in task_serial_init
-        CUDA_CHECK(cudaFreeHost(stream_buffer->image_in));
-        CUDA_CHECK(cudaFreeHost(stream_buffer->image_out));
-        CUDA_CHECK(cudaFreeHost(stream_buffer->maps));
+        CUDA_CHECK(cudaFree(stream_buffer->image_in));
+        CUDA_CHECK(cudaFree(stream_buffer->image_out));
+        CUDA_CHECK(cudaFree(stream_buffer->maps));
         free(stream_buffer);
     }
 
@@ -270,7 +270,7 @@ public:
             //assign image id from client
             this->stream_buffers[available_stream_idx]->img_id = img_id;
             this->streams_availability[available_stream_idx] = false;
-            printf("%d",available_stream_idx);
+            //printf("%d",available_stream_idx);
             //   1. copy the relevant image from images_in to the GPU memory you allocated
             cudaMemcpyAsync(this->stream_buffers[available_stream_idx]->image_in, img_in, IMG_WIDTH * IMG_HEIGHT, cudaMemcpyHostToDevice, this->streams[available_stream_idx]);
             //   2. invoke GPU kernel on this image
