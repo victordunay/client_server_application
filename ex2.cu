@@ -164,8 +164,7 @@ private:
     cudaStream_t streams[N_STREAMS];
     bool streams_availability[N_STREAMS];
 
-    stream_buffers_t* debug[N_STREAMS];
-
+   
     /**
      * @brief Checks if any of the working streams has finished. If there is, it change to a free stream and its img_id returned
      * 
@@ -182,7 +181,7 @@ private:
             if(!streams_availability[streamIdx])
             {
                 status = cudaStreamQuery(this->streams[streamIdx]);
-                CUDA_CHECK(status);
+                //CUDA_CHECK(status);
                 if(cudaSuccess == status)
                 {
                     streams_availability[streamIdx] = true;
@@ -246,6 +245,7 @@ public:
             stream_buffers[streamIdx] = allocate_stream_buffer();
             streams_availability[streamIdx] = true;
 		}
+        cudaDeviceSynchronize();
     }
 
     ~streams_server() override
@@ -270,16 +270,15 @@ public:
             //assign image id from client
             this->stream_buffers[available_stream_idx]->img_id = img_id;
             this->streams_availability[available_stream_idx] = false;
+            printf("%d",available_stream_idx);
             //   1. copy the relevant image from images_in to the GPU memory you allocated
-            CUDA_CHECK( cudaMemcpyAsync(this->stream_buffers[available_stream_idx]->image_in, img_in, IMG_WIDTH * IMG_HEIGHT, cudaMemcpyHostToDevice, this->streams[available_stream_idx]) );
+            cudaMemcpyAsync(this->stream_buffers[available_stream_idx]->image_in, img_in, IMG_WIDTH * IMG_HEIGHT, cudaMemcpyHostToDevice, this->streams[available_stream_idx]);
             //   2. invoke GPU kernel on this image
             process_image_kernel<<<N_TB_SERIAL, GRID_SIZE, 0, streams[available_stream_idx]>>>(this->stream_buffers[available_stream_idx]->image_in, this->stream_buffers[available_stream_idx]->image_out, this->stream_buffers[available_stream_idx]->maps); 
 
             //   3. copy output from GPU memory to relevant location in images_out_gpu_serial
-            CUDA_CHECK( cudaMemcpyAsync(img_out, this->stream_buffers[available_stream_idx]->image_out, IMG_WIDTH * IMG_HEIGHT, cudaMemcpyDeviceToHost, this->streams[available_stream_idx]) );
+            cudaMemcpyAsync(img_out, this->stream_buffers[available_stream_idx]->image_out, IMG_WIDTH * IMG_HEIGHT, cudaMemcpyDeviceToHost, this->streams[available_stream_idx]); 
 
-            
-            
             
             return true;
         }       

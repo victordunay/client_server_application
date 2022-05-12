@@ -211,7 +211,7 @@ int main(int argc, char **argv) {
     }
 
     CUDA_CHECK( cudaFreeHost(images_in) );
-    CUDA_CHECK( cudaFreeHost(images_out_cpu) );
+    CUDA_CHECK( cudaFreeHost(images_out_cpu) ); 
     CUDA_CHECK( cudaFreeHost(images_out_gpu) );
     cudaDeviceReset();
 
