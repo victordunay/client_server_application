@@ -329,31 +329,87 @@ typedef struct
     uchar *image_in;
     uchar *image_out;
     uchar *maps;
-    int img_id;
 } 
 queue_buffers_t;
+
+typedef struct 
+{
+    uchar *image;
+    int img_id;
+} 
+queue_item_t;
 
 
 
 class shared_queue 
 {
 private:
-      
-public:
 
-    uchar *data;
+    //queue data
+    queue_item_t *data;
+    size_t queue_size;
+    bool cpu_side;
+
+    //queue sync variables
+    cuda::atomic<size_t> _head;
+    cuda::atomic<size_t> _tail;
     atomic_lock_t _lock;
+      
 
-    __device__  __host__ void lock(atomic_lock_t * _lock) 
+    //locks functions
+
+    __device__  __host__ void readerLock(atomic_lock_t * _lock) 
     {
-        while (_lock->exchange(1, cuda::cuda::memory_order_relaxed));
+        while(_lock->load(cuda::memory_order_acquire) == true);
+        while(_lock->exchange(1, cuda::memory_order_relaxed));
         cuda::atomic_thread_fence(cuda::memory_order_acquire, cuda::thread_scope_device);
     }
 
-    __device__ __host__ void unlock(atomic_lock_t * _lock) 
+    __device__ __host__ void readerUnlock(atomic_lock_t * _lock) 
     {
         _lock->store(0, cuda::memory_order_release);
     }
+
+public:
+
+    __device__  __host__ void push(int img_id, uchar *img)
+    {
+        int tail =  _tail.load(cuda::memory_order_relaxed);
+        while (tail - _head.load(cuda::memory_order_acquire) == queue_size);
+        
+        
+        //cpu copy from cpu memory to gpu memory. gpu copy from gpu memory to another gpu memory
+        cudaMemcpyKind kind = (cpu_side) ? cudaMemcpyHostToDevice : cudaMemcpyDeviceToDevice ;
+        CUDA_CHECK(cudaMemcpy(data[tail % queue_size]->image,img,IMG_WIDTH * IMG_HEIGHT, kind));
+        data[tail % queue_size]->img_id = img_id;
+        _tail.store(tail + 1, cuda::memory_order_release);
+    }
+
+    __device__  __host__ int pop(uchar *img)
+    {
+        readerLock(_lock);
+        int head = _head.load(memory_order_relaxed);
+        while (_tail.load(memory_order_acquire) == _head)
+        {
+            readerUnlock(_lock);
+            readerLock(_lock);
+            head = _head.load(memory_order_relaxed);
+        }
+
+        //cpu copy from gpu memory to cpu memory. gpu copy from gpu memory to another gpu memory
+        cudaMemcpyKind kind = (cpu_side) ? cudaMemcpyDeviceToHost : cudaMemcpyDeviceToDevice ;
+        CUDA_CHECK(cudaMemcpy(img, data[head % queue_size]->image,IMG_WIDTH * IMG_HEIGHT, kind));
+        int img_id = data[head % queue_size]->img_id;
+
+        _head.store(head + 1, memory_order_release);
+        readerUnlock(_lock);
+        return img_id;
+    }
+
+
+
+
+
 
     shared_queue(int size_in_bytes)
     {   
