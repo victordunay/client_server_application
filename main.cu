@@ -142,7 +142,7 @@ int main(int argc, char **argv) {
         std::unique_ptr<image_processing_server> server;
         switch (mode) {
         case PROGRAM_MODE_STREAMS:
-            server = create_streams_server(); 
+            server = create_streams_server();
             break;
         case PROGRAM_MODE_QUEUE:
             server = create_queues_server(threads_queue_mode);
@@ -159,46 +159,16 @@ int main(int argc, char **argv) {
         int next_img_id = 0;
         int num_dequeued = 0;
         double available_tasks = 0;
-        bool debug = false;
-        int count_debug = 0;
-        bool flag = false;
+
         while (next_img_id < N_IMAGES || num_dequeued < N_IMAGES) {
-            if(flag)
-            {
-                if(debug)
-                {
-                    int dequeued_img_id;
-                    if (server->dequeue(&dequeued_img_id)) {
-                        
-                        ++num_dequeued;
+            int dequeued_img_id;
+            if (server->dequeue(&dequeued_img_id)) {
+                
+                ++num_dequeued;
 
-                        req_t_end[dequeued_img_id] = get_time_msec();
+                req_t_end[dequeued_img_id] = get_time_msec();
 
-                    }
-                    debug=false;
-                }
-                else
-                {
-                    count_debug++;
-                    if(count_debug == 2)
-                    {
-                        count_debug =0;
-                        debug=true;
-                    }
-                }
             }
-            else
-            {
-                int dequeued_img_id;
-                if (server->dequeue(&dequeued_img_id)) {
-                    
-                    ++num_dequeued;
-
-                    req_t_end[dequeued_img_id] = get_time_msec();
-
-                } 
-            }
-            
             /* If we are done with enqueuing, just loop until all are dequeued */
             if (next_img_id == N_IMAGES)
                 continue;
@@ -241,7 +211,7 @@ int main(int argc, char **argv) {
     }
 
     CUDA_CHECK( cudaFreeHost(images_in) );
-    CUDA_CHECK( cudaFreeHost(images_out_cpu) );
+    CUDA_CHECK( cudaFreeHost(images_out_cpu) ); 
     CUDA_CHECK( cudaFreeHost(images_out_gpu) );
     cudaDeviceReset();
 
