@@ -326,21 +326,14 @@ std::unique_ptr<image_processing_server> create_streams_server()
 // TODO implement the persistent kernel
 // TODO implement a function for calculating the threadblocks count
 
+/*
 typedef struct 
 {
     uchar *image_in;
     uchar *image_out;
     uchar *maps;
 } 
-queue_buffers_t;
-
-typedef struct 
-{
-    uchar image[IMG_WIDTH * IMG_WIDTH];
-    int img_id;
-} 
-queue_item_t;
-
+queue_buffers_t;*/
 
 
 class shared_queue 
@@ -350,7 +343,7 @@ private:
     //queue data
     size_t queue_size;
     bool cpu_side;
-    queue_item_t *data;
+    int *data;
 
     //queue sync variables
     atomic<size_t> _head;
@@ -378,7 +371,6 @@ public:
 
     __device__  __host__ void enqueue_response(int img_id, uchar *img)
     {
-
         Lock(_writerlock);
         int tail =  _tail.load(memory_order_relaxed);
         while (tail - _head.load(memory_order_acquire) == queue_size);
@@ -388,9 +380,9 @@ public:
         }
 
         //cpu copy from cpu memory to gpu memory. gpu copy from gpu memory to another gpu memory
-        cudaMemcpyKind kind = (cpu_side) ? cudaMemcpyHostToDevice : cudaMemcpyDeviceToDevice ;
-        CUDA_CHECK(cudaMemcpy(data[tail % queue_size]->image,img,IMG_WIDTH * IMG_HEIGHT, kind));
-        data[tail % queue_size]->img_id = img_id;
+        //cudaMemcpyKind kind = (cpu_side) ? cudaMemcpyHostToDevice : cudaMemcpyDeviceToDevice ;
+        
+        data[tail % queue_size] = img_id;
         _tail.store(tail + 1, memory_order_release);
         Unlock(_writerlock);
     }
@@ -407,9 +399,7 @@ public:
         }
 
         //cpu copy from gpu memory to cpu memory. gpu copy from gpu memory to another gpu memory
-        cudaMemcpyKind kind = (cpu_side) ? cudaMemcpyDeviceToHost : cudaMemcpyDeviceToDevice ;
-        CUDA_CHECK(cudaMemcpy(img, data[head % queue_size]->image,IMG_WIDTH * IMG_HEIGHT, kind));
-        int img_id = data[head % queue_size]->img_id;
+        int img_id = data[head % queue_size];
 
         _head.store(head + 1, memory_order_release);
         Unlock(_readerlock);
@@ -421,25 +411,13 @@ public:
     shared_queue(int queue_size,bool cpu_side):queue_size(queue_size),cpu_side(cpu_side),data(nullptr),_head(0),_tail(0),_readerlock(false),_writerlock(false)
     {   
         // Allocate queue memory
-        size_t size_in_bytes = queue_size * sizeof(queue_item_t);
+        size_t size_in_bytes = queue_size * sizeof(int);
         CUDA_CHECK(cudaMallocHost(&((void*)data), size_in_bytes));
         CUDA_CHECK(cudaMemset(((void*)data), 0, size_in_bytes));
-
-        for(int i = 0; i< queue_size; ++i)
-        {
-            new (data[i]) queue_item_t();
-        }
-    
     }
 
     ~shared_queue() 
     {
-        queue_item_t *temp = data;
-        for(int i = 0; i< queue_size; ++i)
-        {
-            data[i]->~queue_item_t();
-        }
-
         cudaFreeHost(((void*)data));
     }
 };
@@ -447,16 +425,22 @@ public:
 
 
 
+
 __global__
-void consumer_proccessor(shared_queue *gpu_to_cpu_q,shared_queue *cpu_to_gpu_q,uchar *in, uchar *out, uchar* maps){
-    int img_id = cpu_to_gpu_q.dequeue_request(in);
+void consumer_proccessor(shared_queue *gpu_to_cpu_q,shared_queue *cpu_to_gpu_q,uchar *in_array, uchar *out_array,uchar *in, uchar *out, uchar* maps){
+    if(threadIdx.y + threadIdx.x == 0 )
+        int img_id = cpu_to_gpu_q.dequeue_request(in);
+    __syncthreads();
     while(img_id)
     {
+        CUDA_CHECK( cudaMemcpy(stream_buffers[available_stream_idx]->image_in, img_in, IMG_WIDTH * IMG_HEIGHT, cudaMemcpyHostToDevice, streams[available_stream_idx]) );
         process_image(in, out, maps);
         gpu_to_cpu_q.enqueue_response(out);
         img_index = cpu_to_gpu_q.dequeue_request(in);
     }
 }
+
+
 
 
 class queue_server : public image_processing_server
@@ -518,9 +502,9 @@ public:
          uchar* image_in;
          uchar* image_out;
          uchar* maps;
-         CUDA_CHECK( cudaHostAlloc(&image_in,N_IMAGES * IMG_WIDTH * IMG_WIDTH ,0) );
-         CUDA_CHECK( cudaHostAlloc(&image_out,N_IMAGES * IMG_WIDTH * IMG_WIDTH,0) );
-         CUDA_CHECK( cudaHostAlloc(&maps,N_IMAGES * TILE_COUNT * TILE_COUNT * N_BINS,0) );
+         CUDA_CHECK( cudaMalloc(&image_in,threadblocks * IMG_WIDTH * IMG_WIDTH ,0) );
+         CUDA_CHECK( cudaMalloc(&image_out,threadblocks * IMG_WIDTH * IMG_WIDTH,0) );
+         CUDA_CHECK( cudaMalloc(&maps,threadblocks * TILE_COUNT * TILE_COUNT * N_BINS,0) );
  
          //kernel invocing
          dim3 GRID_SIZE(N_THREADS_X, threads/N_THREADS_X , N_THREADS_Z);
