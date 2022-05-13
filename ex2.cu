@@ -13,7 +13,6 @@
 #define REGISTERS_PER_THREAD (32)
 #define DEVICE (0)
 
-
 typedef cuda::atomic<bool> atomic_lock_t;
 
 
@@ -34,7 +33,7 @@ typedef struct
     uchar *image_in;
     uchar *image_out;
     uchar *maps;
-    uchar *cpu_img_out
+    uchar *cpu_img_out;
     int img_id;
 } 
 queue_buffers_t;
@@ -353,7 +352,7 @@ private:
     //queue data
     size_t queue_size;
     device_t device;
-    queue_buffers_t *data[queue_size];
+    queue_buffers_t *data[192];
 
     //queue sync variables
     cuda::atomic<size_t> _head;
@@ -362,28 +361,30 @@ private:
     atomic_lock_t _writerlock;
       
 
+
     //locks functions
-/*
+
     __device__  __host__ void Lock(atomic_lock_t * _lock) 
     {
-        while(_lock->load(cuda::memory_order_acquire) == true);
+        printf("before exchange\n");
+        //while(_lock->load(cuda::memory_order_acquire) == true);
         while(_lock->exchange(1, cuda::memory_order_relaxed));
+        printf("after exchange 2\n");
         atomic_thread_fence(cuda::memory_order_acquire, cuda::thread_scope_device);
+
     }
 
     __device__ __host__ void Unlock(atomic_lock_t * _lock) 
     {
         _lock->store(0, cuda::memory_order_release);
+
     }
-
-*/
-
 
 public:
 
-    __device__  __host__ void enqueue_response((int img_id, uchar *img_in, uchar *img_out)
+    __device__  __host__ void enqueue_response(int img_id, uchar *img_in, uchar *img_out)
     {
-        Lock(_writerlock);
+        Lock(&_writerlock);
         int tail =  _tail.load(cuda::memory_order_relaxed);
         while (tail - _head.load(cuda::memory_order_acquire) == queue_size);
         //Unlock(_writerlock);
@@ -408,12 +409,14 @@ public:
     
         //data[tail % queue_size] = img_id;
         _tail.store(tail + 1, cuda::memory_order_release);
-        Unlock(_writerlock);
+        Unlock(&_writerlock);
     }
 
     __device__  __host__ int dequeue_request(uchar *in, uchar *out, uchar* maps)
+
     {
-        Lock(_readerlock);
+        int img_id = 0;
+        Lock(&(this->_readerlock));
         int head = _head.load(cuda::memory_order_relaxed);
         while (_tail.load(cuda::memory_order_acquire) == _head)
         /*{
@@ -421,16 +424,14 @@ public:
             Lock(_readerlock);
             head = _head.load(cuda::memory_order_relaxed);
         }*/
-
-
         switch (this->device) 
         {
             case CPU:
-                int img_id = this->data[head % queue_size]->img_id;
+                img_id = this->data[head % queue_size]->img_id;
                 break;
             case GPU:
                 //cpu copy from gpu memory to cpu memory. gpu copy from gpu memory to another gpu memory
-                int img_id = this->data[head % queue_size]->img_id;
+                img_id = this->data[head % queue_size]->img_id;
                 out = this->data[head % queue_size]->image_out;
                 in = this->data[head % queue_size]->image_in;
                 maps = this->data[head % queue_size]->maps;
@@ -439,59 +440,49 @@ public:
         }
   
         _head.store(head + 1, cuda::memory_order_release);
-        Unlock(_readerlock);
+        Unlock(&_readerlock);
         return img_id;
     }
 
-  // Allocate GPU memory for a single input image and a single output image.
-    stream_buffers_t *allocate_stream_buffer(void)
+    // Allocate GPU memory for a single input image and a single output image.
+    queue_buffers_t *allocate_queue_buffer(void)
     {
-        auto context = new stream_buffers_t;
+        auto context = new queue_buffers_t;
 
         // allocate GPU memory for a single input image, a single output image, and maps
         CUDA_CHECK( cudaMalloc(&(context->image_in), IMG_WIDTH * IMG_WIDTH) );
         CUDA_CHECK( cudaMalloc(&(context->image_out), IMG_WIDTH * IMG_WIDTH) );
         CUDA_CHECK( cudaMalloc(&(context->maps), TILE_COUNT * TILE_COUNT * N_BINS) );
-
-        // initialize img_id 
-        context->img_id = INIT_ID;
+        context->img_id = 0;
+        context->cpu_img_out = NULL;
 
         return context;
     }
 
-    /* Release allocated resources for the task-serial implementation. */
-    void stream_buffer_free(stream_buffers_t *stream_buffer)
-    {
-        //TODO: free resources allocated in task_serial_init
-        CUDA_CHECK(cudaFree(stream_buffer->image_in));
-        CUDA_CHECK(cudaFree(stream_buffer->image_out));
-        CUDA_CHECK(cudaFree(stream_buffer->maps));
-        free(stream_buffer);
-    }
 
-
-     __device__  __host__ bool isEmpty(void)
-    {
-        return this->_head.load(cuda::memory_order_acquire) ==_tail.load(cuda::memory_order_acquire);
-    }
-    shared_queue(int queue_size, device_t device):
-    queue_size(queue_size),
-    cpu_side(cpu_side),
-    _head(0),
-    _tail(0),
-    _readerlock(false),
-    _writerlock(false),
-    device(device)
+    shared_queue(int queue_size, device_t device)
+    //queue_size(queue_size),
+    //_head(0),
+    //_tail(0),
+    // _readerlock(false),
+    // _writerlock(false),
+    //device(device)
     {   
         // Allocate queue memory
         //size_t size_in_bytes = queue_size * sizeof(int);
+        this->device = device;
+        this->queue_size = queue_size;
+        this->_head = 0;
+        this->_tail = 0;
+        Unlock(&_readerlock);
+        Unlock(&_writerlock);
 
+  
         for (int slotIdx = 0; slotIdx < queue_size; ++slotIdx) 
         {
-            data[slotIdx] = allocate_stream_buffer();
-            data[slotIdx]->img_idx = 0;
-            data[slotIdx]->cpu_img_out = NULL;
+            data[slotIdx] = allocate_queue_buffer();
         }
+
         cudaDeviceSynchronize();
         /*CUDA_CHECK(cudaMallocHost(&((void*)data), queue_size * sizeof(stream_buffers_t) ));
         CUDA_CHECK(cudaMemset(((void*)data), 0, queue_size * sizeof(stream_buffers_t)));*/
@@ -501,21 +492,25 @@ public:
     {
         for (int slotIdx = 0; slotIdx < queue_size; ++slotIdx) 
             {
-                stream_buffer_free(data[streamIdx]);
+                CUDA_CHECK(cudaFree(data[slotIdx]->image_in));
+                CUDA_CHECK(cudaFree(data[slotIdx]->image_out));
+                CUDA_CHECK(cudaFree(data[slotIdx]->maps));
             }	
     }
 };
 
-__global__ void consumer_proccessor(shared_queue *gpu_to_cpu_q,shared_queue *cpu_to_gpu_q,uchar *in_array, uchar *out_array,uchar *in, uchar *out, uchar* maps)
+__global__ void consumer_proccessor(shared_queue *gpu_to_cpu_q,shared_queue *cpu_to_gpu_q,uchar *in, uchar *out, uchar* maps)
 {
-    int finished_jobs = 0;
-    
-    while(N_IMAGES != finished_jobs)
+    int tid = threadIdx.x;
+    int img_id = 0;
+
+    while(1)
     {
         // purpose of threadIdx.y?
-        if(threadIdx.y + threadIdx.x == 0 )
+        //if(threadIdx.y + threadIdx.x == 0 )
+        if(0 == tid)
         {
-            int img_id = cpu_to_gpu_q.dequeue_request(in, out, maps);
+            img_id = cpu_to_gpu_q->dequeue_request(in, out, maps);
         }
         __syncthreads();
         
@@ -526,13 +521,12 @@ __global__ void consumer_proccessor(shared_queue *gpu_to_cpu_q,shared_queue *cpu
             // CUDA_CHECK( cudaMemcpy(stream_buffers[available_stream_idx]->image_in, img_in, IMG_WIDTH * IMG_HEIGHT, cudaMemcpyHostToDevice, streams[available_stream_idx]) );
             process_image(in, out, maps);
 
-            if(threadIdx.y + threadIdx.x == 0 )
+           // if(threadIdx.y + threadIdx.x == 0 )
+            if(0 == tid)
             {
-                gpu_to_cpu_q.enqueue_response(img_id, in, out);
+                gpu_to_cpu_q->enqueue_response(img_id, in, out);
             }
             __syncthreads();
-
-            atomicAdd(&finished_jobs, 1);
 
             // if(threadIdx.y + threadIdx.x == 0 )
             //     img_index = cpu_to_gpu_q.dequeue_request(in);
@@ -550,6 +544,9 @@ private:
     shared_queue *gpu_to_cpu_q;
     shared_queue *cpu_to_gpu_q;
     char* pinned_host_buffer;
+    uchar* image_in;
+    uchar* image_out;
+    uchar* maps;
 
     int calcNumOfTB(int threads)
     {
@@ -596,20 +593,18 @@ public:
         shared_queue *cpu_to_gpu_q = new (pinned_host_buffer) shared_queue(num_of_slots, CPU);
         shared_queue *gpu_to_cpu_q = new (pinned_host_buffer + sizeof(shared_queue)) shared_queue(num_of_slots, GPU);
 
-        
         // TODO launch GPU persistent kernel with given number of threads, and calculated number of threadblocks
 
          //initiate data for proccessing - allocating arrays of data like in bulk for temp use.
-         uchar* image_in;
-         uchar* image_out;
-         uchar* maps;
+      
          /*CUDA_CHECK( cudaMalloc(&image_in,threadblocks * IMG_WIDTH * IMG_WIDTH ,0) );
          CUDA_CHECK( cudaMalloc(&image_out,threadblocks * IMG_WIDTH * IMG_WIDTH,0) );
          CUDA_CHECK( cudaMalloc(&maps,threadblocks * TILE_COUNT * TILE_COUNT * N_BINS,0) );*/
 
          //kernel invocing
          dim3 GRID_SIZE(N_THREADS_X, threads/N_THREADS_X , N_THREADS_Z);
-         consumer_proccessor<<<threadblocks, GRID_SIZE>>>(gpu_to_cpu_q,cpu_to_gpu_q,image_in, image_out, maps); 
+
+         consumer_proccessor<<<threadblocks, GRID_SIZE>>>(gpu_to_cpu_q,cpu_to_gpu_q,this->image_in,this->image_out, this->maps); 
 
     }
 
@@ -622,22 +617,17 @@ public:
 
     bool enqueue(int img_id, uchar *img_in, uchar *img_out) override
     {
-
-        cpu_to_gpu_q.enqueue_response(img_id, img_in, img_out)
-
-        return false;
+        cpu_to_gpu_q->enqueue_response(img_id, img_in, img_out);
+        return true;
     }
 
     bool dequeue(int *img_id) override
     {
         // TODO query (don't block) the producer-consumer queue for any responses.
-        if (gpu_to_cpu_q->isEmpty())
-        {
-            return false;
-        }
-
+        //implement isEmpty _head _tail query
+        return false
         // TODO return the img_id of the request that was completed.
-        *img_id = gpu_to_cpu_q.dequeue_request(image_in, image_out, maps);
+        *img_id = gpu_to_cpu_q->dequeue_request(this->image_in, this->image_out, this->maps);
         return true;
     }
 };
