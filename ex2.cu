@@ -479,12 +479,11 @@ public:
 
     ~shared_queue() 
     {
-        for (int slotIdx = 0; slotIdx < queue_size; ++slotIdx) 
-            {
-                CUDA_CHECK(cudaFree(data[slotIdx]->image_idx));
-                CUDA_CHECK(cudaFree(data[slotIdx]->in));
-                CUDA_CHECK(cudaFree(data[slotIdx]->out));
-            }	
+
+        CUDA_CHECK(cudaFree(image_idx));
+        CUDA_CHECK(cudaFree(in));
+        CUDA_CHECK(cudaFree(out));
+
     }
 };
 
@@ -496,16 +495,16 @@ void consumer_proccessor(shared_queue *gpu_to_cpu_q,shared_queue *cpu_to_gpu_q, 
     __shared__ uchar *out;
 
     if(threadIdx.y + threadIdx.x == 0 )
-        while(cpu_to_gpu_q->dequeue_request(&img_id,&in,&out))
+        while(!cpu_to_gpu_q->dequeue_request(&img_id,&in,&out))
     __syncthreads();
-    while(img_id)
+    while(img_id != INIT_ID)
     {
         process_image(in[img_id * IMG_WIDTH * IMG_HEIGHT], out[img_id * IMG_WIDTH * IMG_HEIGHT], maps);
         if(threadIdx.y + threadIdx.x == 0 )
-            while(gpu_to_cpu_q->enqueue_response(img_id,in,out))
+            while(!gpu_to_cpu_q->enqueue_response(img_id,in,out))
         __syncthreads();
         if(threadIdx.y + threadIdx.x == 0 )
-            while(img_index = cpu_to_gpu_q->dequeue_request(&img_id,&in,&out))
+            while(!cpu_to_gpu_q->dequeue_request(&img_id,&in,&out))
         __syncthreads();
     }
 }
@@ -585,7 +584,7 @@ public:
     {
         for(int i= 0; i<threadblocks; ++i)
         {
-            cpu_to_gpu_q->enqueue_response(-1, nullptr, nullptr);
+            cpu_to_gpu_q->enqueue_response(INIT_ID, nullptr, nullptr);
         }
         cudaDeviceSynchronize();
         // TODO free resources allocated in constructor
@@ -604,10 +603,9 @@ public:
     bool dequeue(int *img_id) override
     {
         // TODO query (don't block) the producer-consumer queue for any responses.
-        if(gpu_to_cpu_q->IsEmpty)
         // TODO return the img_id of the request that was completed.
-        uchar* in;
-        uchar* out;
+        uchar* in = nullptr;
+        uchar* out = nullptr;
         return gpu_to_cpu_q->dequeue_request(img_id,&in,&out);
     }
 };
