@@ -349,15 +349,14 @@ private:
     cuda::atomic<size_t> _tail;
     atomic_lock_t* _readerlock;
     atomic_lock_t* _writerlock;
-      
 
-
-    //locks functions
+public:
+    
+  //locks functions
 
     __device__  __host__ void Lock(atomic_lock_t* _lock) 
     {
         while(_lock->exchange(1, cuda::memory_order_acq_rel));
-
     }
 
     __device__ __host__ void Unlock(atomic_lock_t * _lock) 
@@ -366,8 +365,6 @@ private:
 
     }
 
-public:
-    
     __device__  __host__ bool IsNotEmpty(void)
     {
        int head = _head.load(cuda::memory_order_relaxed);
@@ -405,7 +402,9 @@ public:
 
     __device__  __host__ bool dequeue_request(int* img_id,uchar** image_in, uchar** image_out)
     {
+        printf("\nbefore lock\n");
         Lock(_readerlock);
+        printf("\nafter lock\n");
         bool qIsNotEmpty = IsNotEmpty();  
         if(qIsNotEmpty)
         {
@@ -438,7 +437,15 @@ public:
     }*/
 
 
-    shared_queue(int queue_size):queue_size(queue_size),image_idx(nullptr),in(nullptr),out(nullptr),_head(0),_tail(0),_readerlock(new atomic_lock_t(0)),_writerlock(new atomic_lock_t(0))
+    shared_queue(int queue_size):
+    queue_size(queue_size),
+    image_idx(nullptr),
+    in(nullptr),
+    out(nullptr),
+    _head(0),
+    _tail(0),
+    _readerlock(new atomic_lock_t(0)),
+    _writerlock(new atomic_lock_t(0))
     {   
         // Allocate queue memory
         //size_t size_in_bytes = queue_size * sizeof(int);
@@ -476,7 +483,7 @@ void consumer_proccessor(shared_queue *gpu_to_cpu_q,shared_queue *cpu_to_gpu_q, 
     __shared__ int img_id;
     __shared__ uchar *in;
     __shared__ uchar *out;
-
+    printf("\n5\n");
     if(threadIdx.y + threadIdx.x == 0 )
         while(!cpu_to_gpu_q->dequeue_request(&img_id,&in,&out))
     __syncthreads();
@@ -544,7 +551,6 @@ public:
         threadblocks = calcNumOfTB(threads);
         int num_of_slots =(int) (pow(2,ceil(log2(16*threadblocks))));
         printf("%d number of slots:%d",threadblocks,num_of_slots);
-        
         cudaMallocHost(&pinned_host_buffer, 2 * sizeof(shared_queue));
         // Use placement new operator to construct our class on the pinned buffer
         shared_queue *cpu_to_gpu_q = new (pinned_host_buffer) shared_queue(num_of_slots);
@@ -561,6 +567,7 @@ public:
          //kernel invocing
         dim3 GRID_SIZE(N_THREADS_X, threads/N_THREADS_X , N_THREADS_Z);
         consumer_proccessor<<<threadblocks, GRID_SIZE>>>(gpu_to_cpu_q,cpu_to_gpu_q,maps);
+
     }
 
     ~queue_server() override
@@ -589,6 +596,7 @@ public:
         // TODO return the img_id of the request that was completed.
         uchar* in = nullptr;
         uchar* out = nullptr;
+
         return gpu_to_cpu_q->dequeue_request(img_id,&in,&out);
     }
 };
