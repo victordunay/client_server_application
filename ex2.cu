@@ -391,7 +391,7 @@ public:
      */
     __device__  __host__ bool enqueue_response(int img_id,uchar* in, uchar* out)
     {
-        Lock(debug_lock)
+        Lock(debug_lock);
         bool qIsNotFull = IsNotFull();  
         if(qIsNotFull)
         {
