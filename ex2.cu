@@ -351,7 +351,7 @@ private:
 
     //queue data
     size_t queue_size;
-    device_t device;
+    //device_t device;
     
     int *data;
     uchar **in;
@@ -388,7 +388,7 @@ public:
     /**
      * @brief enqueue an image by sending the id of the image. sending -1 by the cpu is for terminate the kernel
      * 
-     * @param img_id the ןג םכ איק ןצשעק
+     * @param img_id the id of the imag
      */
     __device__  __host__ void enqueue_response(int img_id)
     {
@@ -456,32 +456,26 @@ public:
     }
 
 
-    shared_queue(int queue_size, device_t device)
-    //queue_size(queue_size),
-    //_head(0),
-    //_tail(0),
-    // _readerlock(false),
-    // _writerlock(false),
-    //device(device)
+    shared_queue(int queue_size):queue_size(queue_size),cpu_side(cpu_side),data(nullptr),in(nullptr),out(nullptr),_head(0),_tail(0),_readerlock(false),_writerlock(false)
     {   
         // Allocate queue memory
         //size_t size_in_bytes = queue_size * sizeof(int);
+        /*
         this->device = device;
         this->queue_size = queue_size;
         this->_head = 0;
         this->_tail = 0;
         Unlock(&_readerlock);
-        Unlock(&_writerlock);
+        Unlock(&_writerlock);*/
 
   
-        for (int slotIdx = 0; slotIdx < queue_size; ++slotIdx) 
-        {
-            data[slotIdx] = allocate_queue_buffer();
-        }
-
-        cudaDeviceSynchronize();
-        /*CUDA_CHECK(cudaMallocHost(&((void*)data), queue_size * sizeof(stream_buffers_t) ));
-        CUDA_CHECK(cudaMemset(((void*)data), 0, queue_size * sizeof(stream_buffers_t)));*/
+        size_t size_in_bytes = queue_size * sizeof(int);
+        CUDA_CHECK(cudaMallocHost(&((void*)data), size_in_bytes));
+        CUDA_CHECK(cudaMemset(((void*)data), 0, size_in_bytes));
+        CUDA_CHECK(cudaMallocHost(&((void*)in), size_in_bytes));
+        CUDA_CHECK(cudaMemset(((void*)in), 0, size_in_bytes));
+        CUDA_CHECK(cudaMallocHost(&((void*)out), size_in_bytes));
+        CUDA_CHECK(cudaMemset(((void*)out), 0, size_in_bytes));
     }
 
     ~shared_queue() 
