@@ -13,7 +13,7 @@
 #define REGISTERS_PER_THREAD (32)
 #define DEVICE (0)
 
-typedef cuda::atomic<bool> atomic_lock_t;
+typedef cuda::atomic<int,cuda::thread_scope_device> atomic_lock_t;
 
 
 //using namespace cuda;
@@ -142,10 +142,10 @@ __device__ void process_image(uchar *in, uchar *out, uchar* maps)
     {
         for(int t_col = 0; t_col< TILE_COUNT; ++t_col)
         {
-            create_histogram(image_start,t_row, t_col, cdf, in);
+            create_histogram(0,t_row, t_col, cdf, in);
             __syncthreads();
             prefix_sum(cdf, N_BINS);
-            calculate_maps(map_start, t_row, t_col,cdf, maps); 
+            calculate_maps(0, t_row, t_col,cdf, maps); 
             __syncthreads();
         }
     }
@@ -347,8 +347,8 @@ private:
     //queue sync variables
     cuda::atomic<size_t> _head;
     cuda::atomic<size_t> _tail;
-    atomic_lock_t _readerlock;
-    atomic_lock_t _writerlock;
+    atomic_lock_t* _readerlock;
+    atomic_lock_t* _writerlock;
       
 
 
@@ -425,6 +425,7 @@ public:
         return qIsNotEmpty;
     }
 
+    /*
     // Allocate GPU memory for a single input image and a single output image.
     queue_buffers_t *allocate_queue_buffer(void)
     {
@@ -438,10 +439,10 @@ public:
         context->cpu_img_out = NULL;
 
         return context;
-    }
+    }*/
 
 
-    shared_queue(int queue_size):queue_size(queue_size),cpu_side(cpu_side),image_idx(nullptr),in(nullptr),out(nullptr),_head(0),_tail(0),_readerlock(false),_writerlock(false)
+    shared_queue(int queue_size):queue_size(queue_size),cpu_side(cpu_side),image_idx(nullptr),in(nullptr),out(nullptr),_head(0),_tail(0),_readerlock(new atomic_lock_t(false)),_writerlock(new atomic_lock_t(false))
     {   
         // Allocate queue memory
         //size_t size_in_bytes = queue_size * sizeof(int);
@@ -452,7 +453,6 @@ public:
         this->_tail = 0;
         Unlock(&_readerlock);
         Unlock(&_writerlock);*/
-
   
         size_t size_int_in_bytes = queue_size * sizeof(int);
         CUDA_CHECK(cudaMallocHost(&((void*)image_idx), size_int_in_bytes));
