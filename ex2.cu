@@ -330,6 +330,30 @@ typedef struct
     uchar *maps;
 } 
 queue_buffers_t;*/
+__device__ atomic_lock_t* _readerlock;
+__device__ atomic_lock_t* _writerlock;
+
+__device__  void Lock(atomic_lock_t* _lock) 
+{
+    while(_lock->exchange(1, cuda::memory_order_acq_rel));
+}
+
+__device__  void Unlock(atomic_lock_t * _lock) 
+{
+    _lock->store(0, cuda::memory_order_release);
+}
+
+__global__  void Initlocks() 
+{
+    _readerlock = new atomic_lock_t(0);
+    _writerlock = new atomic_lock_t(0);
+}
+
+__global__ void FreeLocks()
+{
+    delete _readerlock;
+    delete _writerlock;
+}
 
 
 class shared_queue 
@@ -347,33 +371,22 @@ private:
     //queue sync variables
     cuda::atomic<size_t> _head;
     cuda::atomic<size_t> _tail;
-    atomic_lock_t* _readerlock;
-    atomic_lock_t* _writerlock;
 
 public:
     
   //locks functions
 
-    __device__  __host__ void Lock(atomic_lock_t* _lock) 
-    {
-        while(_lock->exchange(1, cuda::memory_order_acq_rel));
-    }
-
-    __device__ __host__ void Unlock(atomic_lock_t * _lock) 
-    {
-        _lock->store(0, cuda::memory_order_release);
-
-    }
 
     __device__  __host__ bool IsNotEmpty(void)
     {
-       int head = _head.load(cuda::memory_order_relaxed);
-       return(_tail.load(cuda::memory_order_acquire) != _head);
+        size_t head = _head.load(cuda::memory_order_relaxed); //this is the problem
+        printf("cccc");
+       return(_tail.load(cuda::memory_order_acquire) != head);
     }
     
     __device__  __host__ bool IsNotFull(void)
     {
-        int tail =  _tail.load(cuda::memory_order_relaxed);
+        size_t tail =  _tail.load(cuda::memory_order_relaxed);
         return (tail - _head.load(cuda::memory_order_acquire) != queue_size);
     }
     
@@ -384,7 +397,6 @@ public:
      */
     __device__  __host__ bool enqueue_response(int img_id,uchar* in, uchar* out)
     {
-        Lock(_writerlock);
         bool qIsNotFull = IsNotFull();  
         if(qIsNotFull)
         {
@@ -395,17 +407,14 @@ public:
             
             _tail.store(tail + 1, cuda::memory_order_release);
         }
-        Unlock(_writerlock);
-        
         return qIsNotFull;
     }
 
     __device__  __host__ bool dequeue_request(int* img_id,uchar** image_in, uchar** image_out)
     {
-        printf("\nbefore lock\n");
-        Lock(_readerlock);
-        printf("\nafter lock\n");
+        printf("\naaaaaa\n");
         bool qIsNotEmpty = IsNotEmpty();  
+        printf("\nbbbbbbb\n");
         if(qIsNotEmpty)
         {
             int head = _head.load(cuda::memory_order_relaxed);
@@ -414,9 +423,7 @@ public:
             *image_out = out[head % queue_size];
             
             _head.store(head + 1, cuda::memory_order_release);
-        }
-        Unlock(_readerlock);
-        
+        }  
         return qIsNotEmpty;
     }
 
@@ -443,9 +450,7 @@ public:
     in(nullptr),
     out(nullptr),
     _head(0),
-    _tail(0),
-    _readerlock(new atomic_lock_t(0)),
-    _writerlock(new atomic_lock_t(0))
+    _tail(0)
     {   
         // Allocate queue memory
         //size_t size_in_bytes = queue_size * sizeof(int);
@@ -485,16 +490,28 @@ void consumer_proccessor(shared_queue *gpu_to_cpu_q,shared_queue *cpu_to_gpu_q, 
     __shared__ uchar *out;
     printf("\n5\n");
     if(threadIdx.y + threadIdx.x == 0 )
+    {
+        Lock(_readerlock);
         while(!cpu_to_gpu_q->dequeue_request(&img_id,&in,&out))
+        Unlock(_readerlock);
+    }
     __syncthreads();
     while(img_id != INIT_ID)
     {
         process_image(&in[img_id * IMG_WIDTH * IMG_HEIGHT], &out[img_id * IMG_WIDTH * IMG_HEIGHT], maps);
         if(threadIdx.y + threadIdx.x == 0 )
+        {
+            Lock(_writerlock);
             while(!gpu_to_cpu_q->enqueue_response(img_id,in,out))
+            Unlock(_writerlock);
+        }
         __syncthreads();
         if(threadIdx.y + threadIdx.x == 0 )
+        {
+            Lock(_readerlock);
             while(!cpu_to_gpu_q->dequeue_request(&img_id,&in,&out))
+            Unlock(_readerlock);
+        }
         __syncthreads();
     }
 }
@@ -550,7 +567,6 @@ public:
         // TODO initialize host state
         threadblocks = calcNumOfTB(threads);
         int num_of_slots =(int) (pow(2,ceil(log2(16*threadblocks))));
-        printf("%d number of slots:%d",threadblocks,num_of_slots);
         cudaMallocHost(&pinned_host_buffer, 2 * sizeof(shared_queue));
         // Use placement new operator to construct our class on the pinned buffer
         shared_queue *cpu_to_gpu_q = new (pinned_host_buffer) shared_queue(num_of_slots);
@@ -563,11 +579,11 @@ public:
         /*CUDA_CHECK( cudaMalloc(&image_in,threadblocks * IMG_WIDTH * IMG_WIDTH ,0) );
         CUDA_CHECK( cudaMalloc(&image_out,threadblocks * IMG_WIDTH * IMG_WIDTH,0) );*/
         CUDA_CHECK( cudaMalloc(&maps, threadblocks * TILE_COUNT * TILE_COUNT * N_BINS) );
-
+        Initlocks<<<1,1>>>();
+        cudaDeviceSynchronize();
          //kernel invocing
         dim3 GRID_SIZE(N_THREADS_X, threads/N_THREADS_X , N_THREADS_Z);
         consumer_proccessor<<<threadblocks, GRID_SIZE>>>(gpu_to_cpu_q,cpu_to_gpu_q,maps);
-
     }
 
     ~queue_server() override
@@ -587,6 +603,7 @@ public:
     {
         //check if full
             //if full return false
+        printf("\nenqueued");
         return cpu_to_gpu_q->enqueue_response(img_id, img_in, img_out);
     }
 
@@ -596,7 +613,7 @@ public:
         // TODO return the img_id of the request that was completed.
         uchar* in = nullptr;
         uchar* out = nullptr;
-
+        printf("\nfgfsgs\n");
         return gpu_to_cpu_q->dequeue_request(img_id,&in,&out);
     }
 };
