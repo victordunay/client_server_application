@@ -402,41 +402,35 @@ public:
      * 
      * @param img_id the id of the image
      */
-    __device__  __host__ bool enqueue_response(int img_id,uchar**in, uchar** out)
+    __device__  __host__ bool enqueue_response(int img_id,uchar* in, uchar* out)
     {
-        int *img_id = INIT_ID;
-       
         Lock(debug_lock)
-      
-        bool qIsEmpty = IsFull();
-       
-        if(!qIsEmpty)
+        bool qIsFull = IsFull();  
+        if(!qIsFull)
         {
-            int head = _head.load(cuda::memory_order_relaxed);
-            *img_id = this->data[head % queue_size]->img_id;
-            qIsEmpty = false;
-
-            _head.store(head + 1, cuda::memory_order_release);
+            int tail = _tail.load(cuda::memory_order_relaxed);
+            image_idx[tail % queue_size] = img_id;
+            in[tail % queue_size] = image_in;
+            out[tail % queue_size] = image_out;
+            
+            _tail.store(tail + 1, cuda::memory_order_release);
         }
         Unlock(&_readerlock);
         
-        return !qIsEmpty;
+        return !qIsFull;
     }
 
-    __device__  __host__ bool dequeue_request(int* img_id,uchar**in, uchar** out)
+    __device__  __host__ bool dequeue_request(int* img_id,uchar** image_in, uchar** image_out)
     {
-        int *img_id = INIT_ID;
-       
         Lock(debug_lock)
-      
-        bool qIsEmpty = IsEmpty();
-       
+        bool qIsEmpty = IsEmpty();  
         if(!qIsEmpty)
         {
             int head = _head.load(cuda::memory_order_relaxed);
-            *img_id = this->data[head % queue_size]->img_id;
-            qIsEmpty = false;
-
+            *img_id = image_idx[head % queue_size];
+            *image_in = in[head % queue_size];
+            *image_out = out[head % queue_size];
+            
             _head.store(head + 1, cuda::memory_order_release);
         }
         Unlock(&_readerlock);
