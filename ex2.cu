@@ -385,16 +385,16 @@ private:
 
 public:
     
-    __device__  __host__ bool IsEmpty(void)
+    __device__  __host__ bool IsNotEmpty(void)
     {
        int head = _head.load(cuda::memory_order_relaxed);
-       return(_tail.load(cuda::memory_order_acquire) == _head);
+       return(_tail.load(cuda::memory_order_acquire) != _head);
     }
     
-    __device__  __host__ bool IsFull(void)
+    __device__  __host__ bool IsNotFull(void)
     {
         int tail =  _tail.load(cuda::memory_order_relaxed);
-        return (tail - _head.load(cuda::memory_order_acquire) == queue_size);
+        return (tail - _head.load(cuda::memory_order_acquire) != queue_size);
     }
     
     /**
@@ -405,8 +405,8 @@ public:
     __device__  __host__ bool enqueue_response(int img_id,uchar* in, uchar* out)
     {
         Lock(debug_lock)
-        bool qIsFull = IsFull();  
-        if(!qIsFull)
+        bool qIsNotFull = IsNotFull();  
+        if(qIsNotFull)
         {
             int tail = _tail.load(cuda::memory_order_relaxed);
             image_idx[tail % queue_size] = img_id;
@@ -417,14 +417,14 @@ public:
         }
         Unlock(&_readerlock);
         
-        return !qIsFull;
+        return qIsNotFull;
     }
 
     __device__  __host__ bool dequeue_request(int* img_id,uchar** image_in, uchar** image_out)
     {
         Lock(debug_lock)
-        bool qIsEmpty = IsEmpty();  
-        if(!qIsEmpty)
+        bool qIsNotEmpty = IsNotEmpty();  
+        if(qIsNotEmpty)
         {
             int head = _head.load(cuda::memory_order_relaxed);
             *img_id = image_idx[head % queue_size];
@@ -435,7 +435,7 @@ public:
         }
         Unlock(&_readerlock);
         
-        return !qIsEmpty;
+        return qIsNotEmpty;
     }
 
     // Allocate GPU memory for a single input image and a single output image.
@@ -496,16 +496,16 @@ void consumer_proccessor(shared_queue *gpu_to_cpu_q,shared_queue *cpu_to_gpu_q, 
     __shared__ uchar *out;
 
     if(threadIdx.y + threadIdx.x == 0 )
-        while(!cpu_to_gpu_q->dequeue_request(&img_id,&in,&out))
+        while(cpu_to_gpu_q->dequeue_request(&img_id,&in,&out))
     __syncthreads();
     while(img_id)
     {
         process_image(in[img_id * IMG_WIDTH * IMG_HEIGHT], out[img_id * IMG_WIDTH * IMG_HEIGHT], maps);
         if(threadIdx.y + threadIdx.x == 0 )
-            while(!gpu_to_cpu_q->enqueue_response(img_id,&in,&out))
+            while(gpu_to_cpu_q->enqueue_response(img_id,in,out))
         __syncthreads();
         if(threadIdx.y + threadIdx.x == 0 )
-            while(!img_index = cpu_to_gpu_q->dequeue_request(&img_id,&in,&out))
+            while(img_index = cpu_to_gpu_q->dequeue_request(&img_id,&in,&out))
         __syncthreads();
     }
 }
