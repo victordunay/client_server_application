@@ -357,16 +357,16 @@ private:
     __device__  __host__ void Lock(atomic_lock_t* _lock) 
     {
         printf("before exchange\n");
-        while(_lock->load(cuda::memory_order_acquire) == true);
-        while(_lock->exchange(true, cuda::memory_order_acq_rel));
-        printf("after exchange 2\n");
+        while(_lock->load(cuda::memory_order_acquire) == 1);
+        while(_lock->exchange(1, cuda::memory_order_acq_rel));
+        printf("after exchange 2\n"); 
         //atomic_thread_fence(cuda::memory_order_acquire, cuda::thread_scope_device);
 
     }
 
     __device__ __host__ void Unlock(atomic_lock_t * _lock) 
     {
-        _lock->store(false, cuda::memory_order_release);
+        _lock->store(0, cuda::memory_order_release);
 
     }
 
@@ -442,7 +442,7 @@ public:
     }*/
 
 
-    shared_queue(int queue_size):queue_size(queue_size),cpu_side(cpu_side),image_idx(nullptr),in(nullptr),out(nullptr),_head(0),_tail(0),_readerlock(new atomic_lock_t(false)),_writerlock(new atomic_lock_t(false))
+    shared_queue(int queue_size):queue_size(queue_size),cpu_side(cpu_side),image_idx(nullptr),in(nullptr),out(nullptr),_head(0),_tail(0),_readerlock(new atomic_lock_t(0)),_writerlock(new atomic_lock_t(0))
     {   
         // Allocate queue memory
         //size_t size_in_bytes = queue_size * sizeof(int);
