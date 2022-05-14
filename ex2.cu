@@ -149,8 +149,8 @@ __device__
 __device__ void process_image(uchar *in, uchar *out, uchar* maps) 
 {
    __shared__ int cdf[N_BINS];
-    int image_start = IMG_WIDTH * IMG_HEIGHT * blockIdx.x;
-    int map_start = TILE_COUNT * TILE_COUNT * N_BINS * blockIdx.x;
+    //int image_start = IMG_WIDTH * IMG_HEIGHT * blockIdx.x;
+    //int map_start = TILE_COUNT * TILE_COUNT * N_BINS * blockIdx.x;
     for(int t_row = 0; t_row< TILE_COUNT; ++t_row)
     {
         for(int t_col = 0; t_col< TILE_COUNT; ++t_col)
@@ -162,7 +162,7 @@ __device__ void process_image(uchar *in, uchar *out, uchar* maps)
             __syncthreads();
         }
     }
-    interpolate_device(&maps[map_start],&in[image_start], &out[image_start]);
+    interpolate_device(&maps,&in, &out);
     return; 
 
 }
@@ -352,7 +352,10 @@ private:
     //queue data
     size_t queue_size;
     device_t device;
-    queue_buffers_t *data[192];
+    
+    int *data;
+    uchar **in;
+    uchar **out;
 
     //queue sync variables
     cuda::atomic<size_t> _head;
@@ -367,49 +370,42 @@ private:
     __device__  __host__ void Lock(atomic_lock_t * _lock) 
     {
         printf("before exchange\n");
-        //while(_lock->load(cuda::memory_order_acquire) == true);
-        while(_lock->exchange(1, cuda::memory_order_relaxed));
+        while(_lock->load(cuda::memory_order_acquire) == true);
+        while(_lock->exchange(true, cuda::memory_order_acq_rel));
         printf("after exchange 2\n");
-        atomic_thread_fence(cuda::memory_order_acquire, cuda::thread_scope_device);
+        //atomic_thread_fence(cuda::memory_order_acquire, cuda::thread_scope_device);
 
     }
 
     __device__ __host__ void Unlock(atomic_lock_t * _lock) 
     {
-        _lock->store(0, cuda::memory_order_release);
+        _lock->store(false, cuda::memory_order_release);
 
     }
 
 public:
 
-    __device__  __host__ void enqueue_response(int img_id, uchar *img_in, uchar *img_out)
+    /**
+     * @brief enqueue an image by sending the id of the image. sending -1 by the cpu is for terminate the kernel
+     * 
+     * @param img_id the ןג םכ איק ןצשעק
+     */
+    __device__  __host__ void enqueue_response(int img_id)
     {
-        Lock(&_writerlock);
+        Lock(_writerlock);
         int tail =  _tail.load(cuda::memory_order_relaxed);
         while (tail - _head.load(cuda::memory_order_acquire) == queue_size);
-        //Unlock(_writerlock);
-        // Lock(_writerlock);
-        // tail =  _tail.load(cuda::memory_order_relaxed);
+            //Unlock(_writerlock);
+            //Lock(_writerlock);
+            //tail =  _tail.load(cuda::memory_order_relaxed);
         
 
         //cpu copy from cpu memory to gpu memory. gpu copy from gpu memory to another gpu memory
         //cudaMemcpyKind kind = (cpu_side) ? cudaMemcpyHostToDevice : cudaMemcpyDeviceToDevice ;
-    switch (this->device) 
-    {
-        case CPU:
-            cudaMemcpy(this->data[tail % queue_size]->image_in, img_in, IMG_WIDTH * IMG_HEIGHT, cudaMemcpyHostToDevice);
-            this->data[tail % queue_size]->cpu_img_out = img_out;
-            this->data[tail % queue_size]->img_id = img_id;
-            break;
-        case GPU:
-            cudaMemcpy(this->data[tail % queue_size]->cpu_img_out, img_out, IMG_WIDTH * IMG_HEIGHT, cudaMemcpyDeviceToHost);
-            this->data[tail % queue_size]->img_id = img_id;
-            break;
-    }
-    
-        //data[tail % queue_size] = img_id;
+        
+        data[tail % queue_size] = img_id;
         _tail.store(tail + 1, cuda::memory_order_release);
-        Unlock(&_writerlock);
+        Unlock(_writerlock);
     }
 
     __device__  __host__ int dequeue_request(uchar *in, uchar *out, uchar* maps)
@@ -499,40 +495,29 @@ public:
     }
 };
 
-__global__ void consumer_proccessor(shared_queue *gpu_to_cpu_q,shared_queue *cpu_to_gpu_q,uchar *in, uchar *out, uchar* maps)
+__global__
+void consumer_proccessor(shared_queue *gpu_to_cpu_q,shared_queue *cpu_to_gpu_q, uchar* maps)
 {
-    int tid = threadIdx.x;
-    int img_id = 0;
+    __shared__ int img_id;
+    __shared__ uchar *in;
+    __shared__ uchar *out;
 
-    while(1)
+    if(threadIdx.y + threadIdx.x == 0 )
+        img_id = cpu_to_gpu_q.dequeue_request(&in,&out);
+    __syncthreads();
+    while(img_id)
     {
-        // purpose of threadIdx.y?
-        //if(threadIdx.y + threadIdx.x == 0 )
-        if(0 == tid)
-        {
-            img_id = cpu_to_gpu_q->dequeue_request(in, out, maps);
-        }
+        //did not finish this
+        //CUDA_CHECK( cudaMemcpy(stream_buffers[available_stream_idx]->image_in, img_in, IMG_WIDTH * IMG_HEIGHT, cudaMemcpyHostToDevice, streams[available_stream_idx]) );
+        process_image(in[img_id * IMG_WIDTH * IMG_HEIGHT], out[img_id * IMG_WIDTH * IMG_HEIGHT], maps);
+        if(threadIdx.y + threadIdx.x == 0 )
+            gpu_to_cpu_q.enqueue_response(img_id,&in,&out);
         __syncthreads();
-        
-        //while(img_id)
-        if(0 != img_id)
-        {
-            //did not finish this
-            // CUDA_CHECK( cudaMemcpy(stream_buffers[available_stream_idx]->image_in, img_in, IMG_WIDTH * IMG_HEIGHT, cudaMemcpyHostToDevice, streams[available_stream_idx]) );
-            process_image(in, out, maps);
-
-           // if(threadIdx.y + threadIdx.x == 0 )
-            if(0 == tid)
-            {
-                gpu_to_cpu_q->enqueue_response(img_id, in, out);
-            }
-            __syncthreads();
-
-            // if(threadIdx.y + threadIdx.x == 0 )
-            //     img_index = cpu_to_gpu_q.dequeue_request(in);
-            // __syncthreads();
-        }
+        if(threadIdx.y + threadIdx.x == 0 )
+            img_index = cpu_to_gpu_q.dequeue_request();
+        __syncthreads();
     }
+}
     
 }
 
@@ -543,10 +528,9 @@ private:
     // TODO define queue server context (memory buffers, etc...)
     shared_queue *gpu_to_cpu_q;
     shared_queue *cpu_to_gpu_q;
+    int threadblocks;
     char* pinned_host_buffer;
-    uchar* image_in;
-    uchar* image_out;
-    uchar* maps;
+   
 
     int calcNumOfTB(int threads)
     {
@@ -583,40 +567,46 @@ public:
     queue_server(int threads)
     {
         // TODO initialize host state
-        int threadblocks = calcNumOfTB(threads);
+        threadblocks = calcNumOfTB(threads);
         int num_of_slots =(int) (pow(2,ceil(log2(16*threadblocks))));
         printf("%d number of slots:%d",threadblocks,num_of_slots);
         
         cudaMallocHost(&pinned_host_buffer, 2 * sizeof(shared_queue));
-        num_of_slots = 16;
         // Use placement new operator to construct our class on the pinned buffer
         shared_queue *cpu_to_gpu_q = new (pinned_host_buffer) shared_queue(num_of_slots, CPU);
         shared_queue *gpu_to_cpu_q = new (pinned_host_buffer + sizeof(shared_queue)) shared_queue(num_of_slots, GPU);
 
         // TODO launch GPU persistent kernel with given number of threads, and calculated number of threadblocks
 
-         //initiate data for proccessing - allocating arrays of data like in bulk for temp use.
+        //initiate data for proccessing - allocating arrays of data like in bulk for temp use.
       
-         /*CUDA_CHECK( cudaMalloc(&image_in,threadblocks * IMG_WIDTH * IMG_WIDTH ,0) );
-         CUDA_CHECK( cudaMalloc(&image_out,threadblocks * IMG_WIDTH * IMG_WIDTH,0) );
-         CUDA_CHECK( cudaMalloc(&maps,threadblocks * TILE_COUNT * TILE_COUNT * N_BINS,0) );*/
+        /*CUDA_CHECK( cudaMalloc(&image_in,threadblocks * IMG_WIDTH * IMG_WIDTH ,0) );
+        CUDA_CHECK( cudaMalloc(&image_out,threadblocks * IMG_WIDTH * IMG_WIDTH,0) );*/
+        uchar* maps;
+        CUDA_CHECK( cudaMalloc(&maps,threadblocks * TILE_COUNT * TILE_COUNT * N_BINS,0) );
 
          //kernel invocing
-         dim3 GRID_SIZE(N_THREADS_X, threads/N_THREADS_X , N_THREADS_Z);
-
-         consumer_proccessor<<<threadblocks, GRID_SIZE>>>(gpu_to_cpu_q,cpu_to_gpu_q,this->image_in,this->image_out, this->maps); 
-
+        dim3 GRID_SIZE(N_THREADS_X, threads/N_THREADS_X , N_THREADS_Z);
+        consumer_proccessor<<<threadblocks, GRID_SIZE>>>(gpu_to_cpu_q,cpu_to_gpu_q,maps);
     }
 
     ~queue_server() override
     {
+        for(int i= 0; i<threadblocks; ++i)
+        {
+            cpu_to_gpu_q->enqueue_response(-1, nullptr, nullptr);
+        }
+        cudaDeviceSynchronize();
         // TODO free resources allocated in constructor
         gpu_to_cpu_q->~shared_queue();
         cpu_to_gpu_q->~shared_queue();
+        cudaFreeHost(pinned_host_buffer);
     }
 
     bool enqueue(int img_id, uchar *img_in, uchar *img_out) override
     {
+        //check if full
+            //if full return false
         cpu_to_gpu_q->enqueue_response(img_id, img_in, img_out);
         return true;
     }
@@ -625,7 +615,7 @@ public:
     {
         // TODO query (don't block) the producer-consumer queue for any responses.
         //implement isEmpty _head _tail query
-        return false
+            //return false
         // TODO return the img_id of the request that was completed.
         *img_id = gpu_to_cpu_q->dequeue_request(this->image_in, this->image_out, this->maps);
         return true;
