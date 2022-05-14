@@ -28,19 +28,6 @@ typedef struct
 } 
 stream_buffers_t;
 
-typedef struct 
-{
-    uchar *image_in;
-    uchar *image_out;
-    uchar *maps;
-    uchar *cpu_img_out;
-    int img_id;
-} 
-queue_buffers_t;
-
-
-
-enum device_t {CPU = 0, GPU};
 
 /*************************************************************************************************/
 /*                                          image proccesing aux                                 */
@@ -367,7 +354,7 @@ private:
 
     //locks functions
 
-    __device__  __host__ void Lock(atomic_lock_t * _lock) 
+    __device__  __host__ void Lock(atomic_lock_t* _lock) 
     {
         printf("before exchange\n");
         while(_lock->load(cuda::memory_order_acquire) == true);
