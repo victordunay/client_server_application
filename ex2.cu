@@ -162,7 +162,7 @@ __device__ void process_image(uchar *in, uchar *out, uchar* maps)
             __syncthreads();
         }
     }
-    interpolate_device(&maps,&in, &out);
+    interpolate_device(maps,in, out);
     return; 
 
 }
