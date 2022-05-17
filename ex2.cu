@@ -619,7 +619,10 @@ public:
         uchar* in = nullptr;
         uchar* out = nullptr;
         //printf("dequeue\n");
-        return gpu_to_cpu_q->dequeue_request(img_id,&in,&out);
+        bool ans = gpu_to_cpu_q->dequeue_request(img_id,&in,&out);
+        if(ans)
+            printf("%d dequeued",*img_id);
+        return ans;
     }
 };
 
