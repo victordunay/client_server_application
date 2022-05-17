@@ -136,8 +136,9 @@ __device__
 __device__ void process_image(uchar *in, uchar *out, uchar* maps) 
 {
    __shared__ int cdf[N_BINS];
+    //printf("1");
     //int image_start = IMG_WIDTH * IMG_HEIGHT * blockIdx.x;
-    //int map_start = TILE_COUNT * TILE_COUNT * N_BINS * blockIdx.x;
+    int map_start = TILE_COUNT * TILE_COUNT * N_BINS * blockIdx.x;
     for(int t_row = 0; t_row< TILE_COUNT; ++t_row)
     {
         for(int t_col = 0; t_col< TILE_COUNT; ++t_col)
@@ -145,11 +146,11 @@ __device__ void process_image(uchar *in, uchar *out, uchar* maps)
             create_histogram(0,t_row, t_col, cdf, in);
             __syncthreads();
             prefix_sum(cdf, N_BINS);
-            calculate_maps(0, t_row, t_col,cdf, maps); 
+            calculate_maps(map_start, t_row, t_col,cdf, maps); 
             __syncthreads();
         }
     }
-    interpolate_device(maps,in, out);
+    interpolate_device(maps+map_start,in, out);
     return; 
 
 }
@@ -355,6 +356,13 @@ __global__ void FreeLocks()
     delete _writerlock;
 }
 
+struct Job
+{
+    int img_id;
+    uchar* img_in;
+    uchar* img_out;
+};
+
 
 class shared_queue 
 {
@@ -362,11 +370,9 @@ private:
 
     //queue data
     size_t queue_size;
-    //device_t device;
-    
-    int *image_idx;
-    uchar **in;
-    uchar **out;
+
+    //queue of jobs;
+    Job* jobs;
 
     //queue sync variables
     cuda::atomic<int> _head;
@@ -379,107 +385,50 @@ public:
     bool IsNotEmpty(void)
     {
         int head = _head.load(cuda::memory_order_relaxed); //this is the problem
-        //printf("\n%d != %d\n",_tail.load(cuda::memory_order_acquire), head);
-       return(_tail.load(cuda::memory_order_acquire) != head);
+        return(_tail.load(cuda::memory_order_acquire) != head);
     }
     
-    __device__  __host__ bool IsNotFull(void)
-    {
-        size_t tail =  _tail.load(cuda::memory_order_relaxed);
-        //printf("\n%d != %d\n",_head.load(cuda::memory_order_acquire), tail);
-        return (tail - _head.load(cuda::memory_order_acquire) != queue_size);
-    }
     
     /**
      * @brief enqueue an image by sending the id of the image. sending -1 by the cpu is for terminate the kernel
      * 
      * @param img_id the id of the image
      */
-    __device__  __host__ bool enqueue_response(int img_id,uchar* in, uchar* out)
+    __device__  __host__ bool enqueue_response(Job enqueue_job)
     {
-        bool qIsNotFull = IsNotFull();  
-        if(qIsNotFull)
+        int tail =  _tail.load(cuda::memory_order_relaxed);
+        if(tail - _head.load(cuda::memory_order_acquire) != queue_size)
         {
-            //printf("enqueue works\n");
-            int tail = _tail.load(cuda::memory_order_relaxed);
-            image_idx[tail % queue_size] = img_id;
-            this->in[tail % queue_size] = in;
-            this->out[tail % queue_size] = out;
-            
+            jobs[_tail % queue_size] = enqueue_job;
             _tail.store(tail + 1, cuda::memory_order_release);
+            return true;
         }
-        return qIsNotFull;
+        return false;
     }
 
-    __device__  __host__ bool dequeue_request(int* img_id,uchar** image_in, uchar** image_out)
+    __device__  __host__ bool dequeue_request(Job* dequeue_job)
     {
-        bool qIsNotEmpty = IsNotEmpty();  
-        if(qIsNotEmpty)
+        int head = _head.load(cuda::memory_order_relaxed);
+        if(_tail.load(cuda::memory_order_acquire) != head)
         {
-            //printf("dequeue works\n");
-            int head = _head.load(cuda::memory_order_relaxed);
-            *img_id = image_idx[head % queue_size];
-            *image_in = in[head % queue_size];
-            *image_out = out[head % queue_size];
-            
+            *dequeue_job = jobs[_head % queue_size];
             _head.store(head + 1, cuda::memory_order_release);
+            return true;
         }  
-        return qIsNotEmpty;
+        return false;
     }
 
-    /*
-    // Allocate GPU memory for a single input image and a single output image.
-    queue_buffers_t *allocate_queue_buffer(void)
-    {
-        auto context = new queue_buffers_t;
-
-        // allocate GPU memory for a single input image, a single output image, and maps
-        CUDA_CHECK( cudaMalloc(&(context->image_in), IMG_WIDTH * IMG_WIDTH) );
-        CUDA_CHECK( cudaMalloc(&(context->image_out), IMG_WIDTH * IMG_WIDTH) );
-        CUDA_CHECK( cudaMalloc(&(context->maps), TILE_COUNT * TILE_COUNT * N_BINS) );
-        context->img_id = 0;
-        context->cpu_img_out = NULL;
-
-        return context;
-    }*/
-
-
-    shared_queue(int queue_size):
-    queue_size(queue_size),
-    image_idx(nullptr),
-    in(nullptr),
-    out(nullptr),
-    _head(0),
-    _tail(0)
+    shared_queue(int queue_size): queue_size(queue_size), jobs(nullptr), _head(0),_tail(0)
     {   
-        // Allocate queue memory
-        //size_t size_in_bytes = queue_size * sizeof(int);
-        /*
-        this->device = device;
-        this->queue_size = queue_size;
-        this->_head = 0;
-        this->_tail = 0;
-        Unlock(&_readerlock);
-        Unlock(&_writerlock);*/
+        size_t size_int_in_bytes = queue_size * sizeof(Job);
+        CUDA_CHECK(cudaMallocHost(&jobs, size_int_in_bytes));
 
-        size_t size_int_in_bytes = queue_size * sizeof(int);
-        CUDA_CHECK(cudaMallocHost(&image_idx, size_int_in_bytes));
-        //CUDA_CHECK(cudaMemset(((void*)image_idx), 0, size_int_in_bytes));
-        size_t size_pointer_in_bytes = queue_size * sizeof(uchar *);
-        CUDA_CHECK(cudaMallocHost(&in, size_pointer_in_bytes));
-        //CUDA_CHECK(cudaMemset(((void*)in), 0, size_pointer_in_bytes));
-        CUDA_CHECK(cudaMallocHost(&out, size_pointer_in_bytes));
-        //CUDA_CHECK(cudaMemset(((void*)out), 0, size_pointer_in_bytes));
     }
 
     ~shared_queue() 
     {
 
-        CUDA_CHECK(cudaFree(image_idx));
-        CUDA_CHECK(cudaFree(in));
-        CUDA_CHECK(cudaFree(out));
-        //delete _head;
-        //delete _tail;
+        CUDA_CHECK(cudaFreeHost(jobs));
     }
 };
 
@@ -487,35 +436,36 @@ public:
 __global__
 void consumer_proccessor(shared_queue *gpu_to_cpu_q,shared_queue *cpu_to_gpu_q, uchar* maps)
 {
-    __shared__ int img_id;
-    __shared__ uchar *in;
-    __shared__ uchar *out;
-    //printf("\n5\n");
-    if(threadIdx.y + threadIdx.x == 0 )
+    __shared__ Job job;
+    int tid = threadIdx.y + threadIdx.x + threadIdx.z;
+    if(tid == 0)
     {
         Lock(_readerlock);
-        while(!cpu_to_gpu_q->dequeue_request(&img_id,&in,&out))
+        while(!cpu_to_gpu_q->dequeue_request(&job));
         Unlock(_readerlock);
     }
     __syncthreads();
-    while(img_id != INIT_ID)
+    while(job.img_id != INIT_ID)
     {
-        process_image(&in[img_id * IMG_WIDTH * IMG_HEIGHT], &out[img_id * IMG_WIDTH * IMG_HEIGHT], maps);
-        if(threadIdx.y + threadIdx.x == 0 )
+        __syncthreads();
+        process_image(job.img_in, job.img_out, maps);
+        __syncthreads();
+        if(tid == 0)
         {
             Lock(_writerlock);
-            while(!gpu_to_cpu_q->enqueue_response(img_id,in,out))
+            while(!gpu_to_cpu_q->enqueue_response(job));
             Unlock(_writerlock);
         }
         __syncthreads();
-        if(threadIdx.y + threadIdx.x == 0 )
+        if(tid == 0 )
         {
             Lock(_readerlock);
-            while(!cpu_to_gpu_q->dequeue_request(&img_id,&in,&out))
+            while(!cpu_to_gpu_q->dequeue_request(&job));
             Unlock(_readerlock);
         }
         __syncthreads();
     }
+    //printf("tb %d working on %d\n",blockIdx.x,job.img_id);
 }
     
 
@@ -575,7 +525,7 @@ public:
         // Use placement new operator to construct our class on the pinned buffer
         cpu_to_gpu_q = new (cpu_to_gpu_buffer) shared_queue(num_of_slots);
         gpu_to_cpu_q = new (gpu_to_cpu_buffer)  shared_queue(num_of_slots);
-
+        printf("%d  %d\n",num_of_slots,threadblocks);
         // TODO launch GPU persistent kernel with given number of threads, and calculated number of threadblocks
 
         //initiate data for proccessing - allocating arrays of data like in bulk for temp use.
@@ -584,7 +534,7 @@ public:
         CUDA_CHECK( cudaMalloc(&image_out,threadblocks * IMG_WIDTH * IMG_WIDTH,0) );*/
         CUDA_CHECK( cudaMalloc(&maps, threadblocks * TILE_COUNT * TILE_COUNT * N_BINS) );
         Initlocks<<<1,1>>>();
-        cudaDeviceSynchronize();
+        CUDA_CHECK(cudaDeviceSynchronize());
          //kernel invocing
         dim3 GRID_SIZE(N_THREADS_X, threads/N_THREADS_X , N_THREADS_Z);
         consumer_proccessor<<<threadblocks, GRID_SIZE>>>(gpu_to_cpu_q,cpu_to_gpu_q,maps);
@@ -594,9 +544,13 @@ public:
     {
         for(int i= 0; i<threadblocks; ++i)
         {
-            cpu_to_gpu_q->enqueue_response(INIT_ID, nullptr, nullptr);
+            Job killing_job;
+            killing_job.img_id = INIT_ID;
+            cpu_to_gpu_q->enqueue_response(killing_job);
         }
+        FreeLocks<<<1,1>>>();
         cudaDeviceSynchronize();
+
         // TODO free resources allocated in constructor
         gpu_to_cpu_q->~shared_queue();
         cpu_to_gpu_q->~shared_queue();
@@ -609,19 +563,26 @@ public:
         //check if full
             //if full return false
         //printf("enqueued\n");
-        return cpu_to_gpu_q->enqueue_response(img_id, img_in, img_out);
+        //insert parameter to a job temp variable
+        Job enqueue_job;
+        enqueue_job.img_id = img_id;
+        enqueue_job.img_in = img_in;
+        enqueue_job.img_out = img_out;
+        //printf("%d is enqueued\n", img_id);
+        return cpu_to_gpu_q->enqueue_response(enqueue_job);
     }
 
     bool dequeue(int *img_id) override
     {
         // TODO query (don't block) the producer-consumer queue for any responses.
         // TODO return the img_id of the request that was completed.
-        uchar* in = nullptr;
-        uchar* out = nullptr;
         //printf("dequeue\n");
-        bool ans = gpu_to_cpu_q->dequeue_request(img_id,&in,&out);
+        Job dequeue_job;
+        bool ans = gpu_to_cpu_q->dequeue_request(&dequeue_job);
         if(ans)
-            printf("%d dequeued",*img_id);
+        {
+            *img_id = dequeue_job.img_id;
+        }
         return ans;
     }
 };
