@@ -529,9 +529,6 @@ public:
         // TODO launch GPU persistent kernel with given number of threads, and calculated number of threadblocks
 
         //initiate data for proccessing - allocating arrays of data like in bulk for temp use.
-      
-        /*CUDA_CHECK( cudaMalloc(&image_in,threadblocks * IMG_WIDTH * IMG_WIDTH ,0) );
-        CUDA_CHECK( cudaMalloc(&image_out,threadblocks * IMG_WIDTH * IMG_WIDTH,0) );*/
         CUDA_CHECK( cudaMalloc(&maps, threadblocks * TILE_COUNT * TILE_COUNT * N_BINS) );
         Initlocks<<<1,1>>>();
         CUDA_CHECK(cudaDeviceSynchronize());
@@ -549,13 +546,13 @@ public:
             cpu_to_gpu_q->enqueue_response(killing_job);
         }
         FreeLocks<<<1,1>>>();
-        cudaDeviceSynchronize();
+        CUDA_CHECK(cudaDeviceSynchronize());
 
         // TODO free resources allocated in constructor
         gpu_to_cpu_q->~shared_queue();
         cpu_to_gpu_q->~shared_queue();
-        cudaFreeHost(cpu_to_gpu_buffer);
-        cudaFreeHost(gpu_to_cpu_buffer);
+        CUDA_CHECK(cudaFreeHost(cpu_to_gpu_buffer));
+        CUDA_CHECK(cudaFreeHost(gpu_to_cpu_buffer));
     }
 
     bool enqueue(int img_id, uchar *img_in, uchar *img_out) override
