@@ -9,6 +9,7 @@
 #define N_THREADS_Z (1)
 #define NO_EMPTY_STREAMS (-1)
 #define INIT_ID (-1)
+#define KILLING_JOB (-1)
 #define SHARED_MEM_PER_BLOCK (2048)
 #define REGISTERS_PER_THREAD (32)
 #define DEVICE (0)
@@ -314,28 +315,18 @@ std::unique_ptr<image_processing_server> create_streams_server()
     return std::make_unique<streams_server>();
 }
 
-/*********************************************************************************************************/
-/*                                      queue_server class                                             */
-/*********************************************************************************************************/
 
-// TODO implement a lock
-// TODO implement a MPMC queue
-// TODO implement the persistent kernel
-// TODO implement a function for calculating the threadblocks count
 
-/*
-typedef struct 
-{
-    uchar *image_in;
-    uchar *image_out;
-    uchar *maps;
-} 
-queue_buffers_t;*/
+/*********************************************************************************************************/
+/*                                          locks                                                        */
+/*********************************************************************************************************/ 
+
 __device__ atomic_lock_t* _readerlock;
 __device__ atomic_lock_t* _writerlock;
 
 __device__  void Lock(atomic_lock_t* _lock) 
 {
+    while(_lock->load(cuda::memory_order_relaxed) == 1);
     while(_lock->exchange(1, cuda::memory_order_acq_rel));
 }
 
@@ -356,6 +347,9 @@ __global__ void FreeLocks()
     delete _writerlock;
 }
 
+
+
+//A single item in the queue
 struct Job
 {
     int img_id;
@@ -363,6 +357,10 @@ struct Job
     uchar* img_out;
 };
 
+
+/*********************************************************************************************************/
+/*                                      queue (ring buffer) class                                        */
+/*********************************************************************************************************/
 
 class shared_queue 
 {
@@ -379,25 +377,17 @@ private:
     cuda::atomic<int> _tail;
 
 public:
-    
-
-    __device__ __host__
-    bool IsNotEmpty(void)
-    {
-        int head = _head.load(cuda::memory_order_relaxed); //this is the problem
-        return(_tail.load(cuda::memory_order_acquire) != head);
-    }
-    
-    
+       
     /**
-     * @brief enqueue an image by sending the id of the image. sending -1 by the cpu is for terminate the kernel
-     * 
-     * @param img_id the id of the image
-     */
-    __device__  __host__ bool enqueue_response(Job enqueue_job)
+    * @brief enqueue an image by a job and adding it to the queue (if not full). sending -1 by the cpu is for terminate the kernel
+    * 
+    * @param enqueue_job a Job struct. send to be enqueued
+    * @return true if enqueue succeeded and false otherwise (full)
+    */
+    __device__  __host__ bool enqueueJob(Job enqueue_job)
     {
         int tail =  _tail.load(cuda::memory_order_relaxed);
-        if(tail - _head.load(cuda::memory_order_acquire) != queue_size)
+        if(tail - (int)_head.load(cuda::memory_order_acquire) != (int)queue_size)
         {
             jobs[_tail % queue_size] = enqueue_job;
             _tail.store(tail + 1, cuda::memory_order_release);
@@ -406,7 +396,13 @@ public:
         return false;
     }
 
-    __device__  __host__ bool dequeue_request(Job* dequeue_job)
+    /**
+    * @brief dequeue a job (if not empty) and saves it to the Job pointer given
+    * 
+    * @param dequeue_job a pointer to Job struct. send to be dequeued
+    * @return true if dequeue succeeded and false otherwise (empty)
+    */
+    __device__  __host__ bool dequeueJob(Job* dequeue_job)
     {
         int head = _head.load(cuda::memory_order_relaxed);
         if(_tail.load(cuda::memory_order_acquire) != head)
@@ -418,57 +414,65 @@ public:
         return false;
     }
 
+    //constructor creat an array of Jobs in size of queue_size jobs
     shared_queue(int queue_size): queue_size(queue_size), jobs(nullptr), _head(0),_tail(0)
     {   
         size_t size_int_in_bytes = queue_size * sizeof(Job);
         CUDA_CHECK(cudaMallocHost(&jobs, size_int_in_bytes));
-
     }
 
+    //destructor frees the array first
     ~shared_queue() 
     {
-
         CUDA_CHECK(cudaFreeHost(jobs));
     }
 };
 
+
+/*********************************************************************************************************/
+/*                                      the consumer_producer kernel                                     */
+/*********************************************************************************************************/
 
 __global__
 void consumer_proccessor(shared_queue *gpu_to_cpu_q,shared_queue *cpu_to_gpu_q, uchar* maps)
 {
     __shared__ Job job;
     int tid = threadIdx.y + threadIdx.x + threadIdx.z;
+
+    //dequeue the first job
     if(tid == 0)
     {
         Lock(_readerlock);
-        while(!cpu_to_gpu_q->dequeue_request(&job));
+        while(!cpu_to_gpu_q->dequeueJob(&job));
         Unlock(_readerlock);
     }
     __syncthreads();
-    while(job.img_id != INIT_ID)
+    
+    //kernel runs until it get img_id = KILLING_JOB
+    while(job.img_id != KILLING_JOB)
     {
-        __syncthreads();
         process_image(job.img_in, job.img_out, maps);
         __syncthreads();
-        if(tid == 0)
+        if(tid == 0)//enqueue the finished job back to cpu
         {
             Lock(_writerlock);
-            while(!gpu_to_cpu_q->enqueue_response(job));
+            while(!gpu_to_cpu_q->enqueueJob(job));
             Unlock(_writerlock);
         }
         __syncthreads();
-        if(tid == 0 )
+        if(tid == 0 )//dequeue new job from the cpu
         {
             Lock(_readerlock);
-            while(!cpu_to_gpu_q->dequeue_request(&job));
+            while(!cpu_to_gpu_q->dequeueJob(&job));
             Unlock(_readerlock);
         }
         __syncthreads();
     }
-    //printf("tb %d working on %d\n",blockIdx.x,job.img_id);
 }
     
-
+/*********************************************************************************************************/
+/*                                      queue_server class                                               */
+/*********************************************************************************************************/
 
 class queue_server : public image_processing_server
 {
@@ -482,7 +486,12 @@ private:
     char* gpu_to_cpu_buffer;
     uchar *maps;
 
-
+    /**
+     * @brief calculates the number of thread blocks the device can handle in parrallel
+     * 
+     * @param threads the number of threads in each threadblock
+     * @return int the number of threadblocks
+     */
     int calcNumOfTB(int threads)
     {
         cudaDeviceProp prop;
@@ -497,9 +506,7 @@ private:
         int regs_bound = (int) (floor(regs_per_multi/(REGISTERS_PER_THREAD*threads))*num_of_multi);
         int shared_mem_bound = (int) (floor(shared_per_multi/SHARED_MEM_PER_BLOCK)*num_of_multi);
 
-        //printf("number of SMs : %d\n\n every SM supports %d threads, %d registers and %d shared memory\n",num_of_multi,threads_per_multi,regs_per_multi,shared_per_multi);
-        //printf("thus the bounds are:\n %d for threads\n %d for registers\n %d for shared memory\n",threads_bound,regs_bound,shared_mem_bound);
-        //int lesser = threads_bound - regs_bound;
+        //calc min in a stupid way
         if(threads_bound > shared_mem_bound)
         {
             return (shared_mem_bound>regs_bound) ? regs_bound : shared_mem_bound;
@@ -515,40 +522,42 @@ private:
  
 
 public:
+
     queue_server(int threads)
     {
         // TODO initialize host state
         threadblocks = calcNumOfTB(threads);
         int num_of_slots =(int) (pow(2,ceil(log2(16*threadblocks))));
-        cudaMallocHost(&cpu_to_gpu_buffer, sizeof(shared_queue));
-        cudaMallocHost(&gpu_to_cpu_buffer, sizeof(shared_queue));
-        // Use placement new operator to construct our class on the pinned buffer
+
+        //allocate 2 pined queues
+        CUDA_CHECK(cudaMallocHost(&cpu_to_gpu_buffer, sizeof(shared_queue)));
+        CUDA_CHECK(cudaMallocHost(&gpu_to_cpu_buffer, sizeof(shared_queue)));
         cpu_to_gpu_q = new (cpu_to_gpu_buffer) shared_queue(num_of_slots);
         gpu_to_cpu_q = new (gpu_to_cpu_buffer)  shared_queue(num_of_slots);
-        printf("%d  %d\n",num_of_slots,threadblocks);
-        // TODO launch GPU persistent kernel with given number of threads, and calculated number of threadblocks
+    
+        //initiate locks
+        Initlocks<<<1,1>>>();
 
         //initiate data for proccessing - allocating arrays of data like in bulk for temp use.
         CUDA_CHECK( cudaMalloc(&maps, threadblocks * TILE_COUNT * TILE_COUNT * N_BINS) );
-        Initlocks<<<1,1>>>();
-        CUDA_CHECK(cudaDeviceSynchronize());
-         //kernel invocing
+        //kernel invocing
         dim3 GRID_SIZE(N_THREADS_X, threads/N_THREADS_X , N_THREADS_Z);
         consumer_proccessor<<<threadblocks, GRID_SIZE>>>(gpu_to_cpu_q,cpu_to_gpu_q,maps);
     }
 
     ~queue_server() override
     {
+        //kills all threadblocks
         for(int i= 0; i<threadblocks; ++i)
         {
-            Job killing_job;
-            killing_job.img_id = INIT_ID;
-            cpu_to_gpu_q->enqueue_response(killing_job);
+            Job killing_job = {KILLING_JOB,nullptr,nullptr};
+            cpu_to_gpu_q->enqueueJob(killing_job);
         }
+        //free locks
         FreeLocks<<<1,1>>>();
         CUDA_CHECK(cudaDeviceSynchronize());
 
-        // TODO free resources allocated in constructor
+        // free queues memory
         gpu_to_cpu_q->~shared_queue();
         cpu_to_gpu_q->~shared_queue();
         CUDA_CHECK(cudaFreeHost(cpu_to_gpu_buffer));
@@ -557,29 +566,16 @@ public:
 
     bool enqueue(int img_id, uchar *img_in, uchar *img_out) override
     {
-        //check if full
-            //if full return false
-        //printf("enqueued\n");
-        //insert parameter to a job temp variable
-        Job enqueue_job;
-        enqueue_job.img_id = img_id;
-        enqueue_job.img_in = img_in;
-        enqueue_job.img_out = img_out;
-        //printf("%d is enqueued\n", img_id);
-        return cpu_to_gpu_q->enqueue_response(enqueue_job);
+        Job enqueue_job = {img_id,img_in,img_out};
+        return cpu_to_gpu_q->enqueueJob(enqueue_job);
     }
 
     bool dequeue(int *img_id) override
     {
-        // TODO query (don't block) the producer-consumer queue for any responses.
-        // TODO return the img_id of the request that was completed.
-        //printf("dequeue\n");
         Job dequeue_job;
-        bool ans = gpu_to_cpu_q->dequeue_request(&dequeue_job);
+        bool ans = gpu_to_cpu_q->dequeueJob(&dequeue_job);
         if(ans)
-        {
             *img_id = dequeue_job.img_id;
-        }
         return ans;
     }
 };
