@@ -1,7 +1,7 @@
 DEBUG=0
 
 ifneq ($(DEBUG), 0)
-CFLAGS=-O0 -g -G -Xcompiler -rdynamic -lineinfo
+CFLAGS=-O0 -g -G
 else
 CFLAGS=-O3 -lineinfo
 endif

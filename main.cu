@@ -137,9 +137,9 @@ int main(int argc, char **argv) {
     if (mode == PROGRAM_MODE_QUEUE) printf("threads = %d\n", threads_queue_mode);
 
     {
-        
         long long int distance_sqr;
         std::unique_ptr<image_processing_server> server;
+
         switch (mode) {
         case PROGRAM_MODE_STREAMS:
             server = create_streams_server();
@@ -148,7 +148,7 @@ int main(int argc, char **argv) {
             server = create_queues_server(threads_queue_mode);
             break;
         }
-        
+
         std::vector<double> req_t_start(N_IMAGES, NAN), req_t_end(N_IMAGES, NAN);
 
         rate_limit rate_limiter(load, 0);
@@ -162,13 +162,9 @@ int main(int argc, char **argv) {
 
         while (next_img_id < N_IMAGES || num_dequeued < N_IMAGES) {
             int dequeued_img_id;
-
             if (server->dequeue(&dequeued_img_id)) {
-
                 ++num_dequeued;
-
                 req_t_end[dequeued_img_id] = get_time_msec();
-
             }
 
             /* If we are done with enqueuing, just loop until all are dequeued */
@@ -183,9 +179,8 @@ int main(int argc, char **argv) {
                 }
                 available_tasks += num_to_send;
             }
-            if (available_tasks > next_img_id) 
-            {
 
+            if (available_tasks > next_img_id) {
                 /* Enqueue a new image */
                 if (server->enqueue(next_img_id, &images_in[next_img_id * IMG_WIDTH * IMG_HEIGHT],
                                                  &images_out_gpu[next_img_id * IMG_WIDTH * IMG_HEIGHT])) {
@@ -215,7 +210,7 @@ int main(int argc, char **argv) {
     }
 
     CUDA_CHECK( cudaFreeHost(images_in) );
-    CUDA_CHECK( cudaFreeHost(images_out_cpu) ); 
+    CUDA_CHECK( cudaFreeHost(images_out_cpu) );
     CUDA_CHECK( cudaFreeHost(images_out_gpu) );
     cudaDeviceReset();
 
