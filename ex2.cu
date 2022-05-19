@@ -389,7 +389,7 @@ public:
         int tail =  _tail.load(cuda::memory_order_relaxed);
         if(tail - (int)_head.load(cuda::memory_order_acquire) != (int)queue_size)
         {
-            jobs[_tail % queue_size] = enqueue_job;
+            jobs[tail % queue_size] = enqueue_job;
             _tail.store(tail + 1, cuda::memory_order_release);
             return true;
         }
@@ -407,7 +407,7 @@ public:
         int head = _head.load(cuda::memory_order_relaxed);
         if(_tail.load(cuda::memory_order_acquire) != head)
         {
-            *dequeue_job = jobs[_head % queue_size];
+            *dequeue_job = jobs[head % queue_size];
             _head.store(head + 1, cuda::memory_order_release);
             return true;
         }  
