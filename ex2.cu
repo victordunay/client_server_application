@@ -562,6 +562,7 @@ public:
         cpu_to_gpu_q->~shared_queue();
         CUDA_CHECK(cudaFreeHost(cpu_to_gpu_buffer));
         CUDA_CHECK(cudaFreeHost(gpu_to_cpu_buffer));
+        CUDA_CHECK( cudaFree(maps));
     }
 
     bool enqueue(int img_id, uchar *img_in, uchar *img_out) override
